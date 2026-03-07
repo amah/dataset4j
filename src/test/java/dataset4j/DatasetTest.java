@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.*;
 
+import static dataset4j.CompositeKey.key;
+import static dataset4j.CompositeKey.on;
 import static org.junit.jupiter.api.Assertions.*;
 
 class DatasetTest {
@@ -461,13 +463,6 @@ class DatasetTest {
             assertEquals(84, p.mapRight(r -> r * 2).right());
         }
 
-        @Test void withThird() {
-            var p = new Pair<>("a", "b");
-            var t = p.withThird("c");
-            assertEquals("a", t.first());
-            assertEquals("b", t.second());
-            assertEquals("c", t.third());
-        }
 
         @Test void positionalAccessors() {
             var p = new Pair<>("a", "b");
@@ -487,102 +482,6 @@ class DatasetTest {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Triplet joins and utilities
-    // -----------------------------------------------------------------
-
-    @Nested class TripletTests {
-        static final Dataset<Department> DEPTS = Dataset.of(
-            new Department("Eng", "SF"),
-            new Department("Sales", "NYC")
-        );
-        static final Dataset<Budget> BUDGETS = Dataset.of(
-            new Budget("Eng", 500_000),
-            new Budget("Sales", 300_000)
-        );
-
-        @Test void innerJoin3() {
-            var result = EMPLOYEES.innerJoin3(
-                DEPTS, Employee::dept, Department::dept,
-                BUDGETS, Department::dept, Budget::dept);
-            assertEquals(5, result.size());
-
-            var alice = result.get(0);
-            assertEquals("Alice", alice.first().name());
-            assertEquals("SF", alice.second().location());
-            assertEquals(500_000, alice.third().amount());
-        }
-
-        @Test void leftJoin3() {
-            var deptsPartial = Dataset.of(new Department("Eng", "SF"));
-            var result = EMPLOYEES.leftJoin3(
-                deptsPartial, Employee::dept, Department::dept,
-                BUDGETS, Department::dept, Budget::dept);
-            assertEquals(5, result.size());
-
-            // Bob (Sales) has no dept match → second and third are null
-            var bob = result.filter(t -> t.first().name().equals("Bob")).get(0);
-            assertNull(bob.second());
-            assertNull(bob.third());
-        }
-
-        @Test void tripletMap() {
-            var t = new Triplet<>("a", "b", "c");
-            assertEquals("a-b-c", t.map((a, b, c) -> a + "-" + b + "-" + c));
-        }
-
-        @Test void tripletMapFirst() {
-            var t = new Triplet<>("hello", 1, 2);
-            assertEquals("HELLO", t.mapFirst(String::toUpperCase).first());
-        }
-
-        @Test void tripletDropThird() {
-            var t = new Triplet<>("a", "b", "c");
-            var p = t.dropThird();
-            assertEquals("a", p.left());
-            assertEquals("b", p.right());
-        }
-
-        @Test void tripletDropFirst() {
-            var t = new Triplet<>("a", "b", "c");
-            var p = t.dropFirst();
-            assertEquals("b", p.left());
-            assertEquals("c", p.right());
-        }
-
-        @Test void tripletPositionalAliases() {
-            var t = new Triplet<>("a", "b", "c");
-            assertEquals("a", t.left());
-            assertEquals("b", t.middle());
-            assertEquals("c", t.right());
-        }
-
-        @Test void tripletToString() {
-            assertEquals("(1, 2, 3)", new Triplet<>(1, 2, 3).toString());
-        }
-
-        @Test void tripletEqualsAndHashCode() {
-            var t1 = new Triplet<>("a", 1, true);
-            var t2 = new Triplet<>("a", 1, true);
-            assertEquals(t1, t2);
-            assertEquals(t1.hashCode(), t2.hashCode());
-        }
-
-        @Test void threeWayJoinChaining() {
-            // Full pipeline: join 3 tables → filter → aggregate
-            record Summary(String dept, double avgAge, int budget) {}
-            var result = EMPLOYEES.innerJoin3(
-                    DEPTS, Employee::dept, Department::dept,
-                    BUDGETS, Department::dept, Budget::dept)
-                .filter(t -> t.first().age() > 25)
-                .groupBy(t -> t.second().dept())
-                .aggregate((dept, group) -> new Summary(
-                    dept,
-                    group.meanInt(t -> t.first().age()).orElse(0),
-                    group.get(0).third().amount()));
-            assertEquals(2, result.size());
-        }
-    }
 
     // -----------------------------------------------------------------
     // Window operations
@@ -630,6 +529,243 @@ class DatasetTest {
         int total = EMPLOYEES.pipe(ds ->
             ds.filter(e -> e.age() < 30).sumInt(Employee::age));
         assertEquals(53, total);
+    }
+
+    // -----------------------------------------------------------------
+    // Multi-key joins with CompositeKey
+    // -----------------------------------------------------------------
+
+    @Nested class MultiKeyJoins {
+        
+        record EmployeeExt(String name, int age, String dept, String location) {}
+        record DepartmentExt(String dept, String location, String manager) {}
+        
+        static final Dataset<EmployeeExt> EMP_EXT = Dataset.of(
+            new EmployeeExt("Alice",   30, "Eng", "SF"),
+            new EmployeeExt("Bob",     25, "Sales", "NYC"),
+            new EmployeeExt("Charlie", 35, "Eng", "NYC"),
+            new EmployeeExt("Diana",   28, "Sales", "SF")
+        );
+        
+        static final Dataset<DepartmentExt> DEPT_EXT = Dataset.of(
+            new DepartmentExt("Eng", "SF", "Tech Lead SF"),
+            new DepartmentExt("Eng", "NYC", "Tech Lead NYC"),
+            new DepartmentExt("Sales", "SF", "Sales Manager SF"),
+            new DepartmentExt("Sales", "LA", "Sales Manager LA") // no matching employee
+        );
+
+        @Test void compositeKeyEquality() {
+            var key1 = key("Eng", "SF");
+            var key2 = key("Eng", "SF");
+            var key3 = key("Eng", "NYC");
+            
+            assertEquals(key1, key2);
+            assertNotEquals(key1, key3);
+            assertEquals(key1.hashCode(), key2.hashCode());
+        }
+
+        @Test void innerJoinMulti() {
+            var joined = EMP_EXT.innerJoinMulti(DEPT_EXT,
+                e -> key(e.dept(), e.location()),
+                d -> key(d.dept(), d.location()));
+            
+            assertEquals(3, joined.size()); // Alice, Charlie, Diana match
+            
+            var alice = joined.stream()
+                .filter(p -> p.left().name().equals("Alice"))
+                .findFirst().orElseThrow();
+            assertEquals("Tech Lead SF", alice.right().manager());
+            
+            var charlie = joined.stream()
+                .filter(p -> p.left().name().equals("Charlie"))
+                .findFirst().orElseThrow();
+            assertEquals("Tech Lead NYC", charlie.right().manager());
+        }
+
+        @Test void leftJoinMulti() {
+            var joined = EMP_EXT.leftJoinMulti(DEPT_EXT,
+                e -> key(e.dept(), e.location()),
+                d -> key(d.dept(), d.location()));
+            
+            assertEquals(4, joined.size()); // All employees present
+            
+            var bob = joined.stream()
+                .filter(p -> p.left().name().equals("Bob"))
+                .findFirst().orElseThrow();
+            assertNull(bob.right()); // Bob is Sales-NYC, no matching dept
+        }
+
+        @Test void innerJoin2Convenience() {
+            var joined = EMP_EXT.innerJoin2(DEPT_EXT,
+                EmployeeExt::dept, EmployeeExt::location,
+                DepartmentExt::dept, DepartmentExt::location);
+            
+            assertEquals(3, joined.size());
+            
+            // Verify we get the same results as innerJoinMulti
+            var names = joined.stream()
+                .map(p -> p.left().name())
+                .sorted()
+                .toList();
+            assertEquals(List.of("Alice", "Charlie", "Diana"), names);
+        }
+
+        @Test void leftJoin2Convenience() {
+            var joined = EMP_EXT.leftJoin2(DEPT_EXT,
+                EmployeeExt::dept, EmployeeExt::location,
+                DepartmentExt::dept, DepartmentExt::location);
+            
+            assertEquals(4, joined.size());
+            
+            long nullCount = joined.stream()
+                .filter(p -> p.right() == null)
+                .count();
+            assertEquals(1, nullCount); // Bob has no match
+        }
+
+        @Test void innerJoin3KeysConvenience() {
+            record Product(String category, String brand, String region, int price) {}
+            record Inventory(String category, String brand, String region, int stock) {}
+            
+            var products = Dataset.of(
+                new Product("Electronics", "Apple", "US", 999),
+                new Product("Electronics", "Samsung", "US", 799),
+                new Product("Clothing", "Nike", "EU", 120)
+            );
+            
+            var inventory = Dataset.of(
+                new Inventory("Electronics", "Apple", "US", 50),
+                new Inventory("Electronics", "Samsung", "US", 25),
+                new Inventory("Clothing", "Adidas", "EU", 100) // different brand
+            );
+            
+            var joined = products.innerJoin3Keys(inventory,
+                Product::category, Product::brand, Product::region,
+                Inventory::category, Inventory::brand, Inventory::region);
+            
+            assertEquals(2, joined.size()); // Apple and Samsung match, Nike doesn't
+            
+            var appleJoin = joined.stream()
+                .filter(p -> p.left().brand().equals("Apple"))
+                .findFirst().orElseThrow();
+            assertEquals(50, appleJoin.right().stock());
+        }
+
+        @Test void compositeKeyWithVariousTypes() {
+            var key = key("string", 42, true, 3.14);
+            assertEquals(4, key.size());
+            assertEquals("string", key.get(0));
+            assertEquals(42, key.get(1));
+            assertEquals(true, key.get(2));
+            assertEquals(3.14, key.get(3));
+        }
+
+        @Test void compositeKeyToString() {
+            var key = key("Eng", "SF");
+            assertEquals("CompositeKey[Eng, SF]", key.toString());
+        }
+
+        @Test void compositeKeyEmptyThrows() {
+            assertThrows(IllegalArgumentException.class, () -> key());
+        }
+
+        // ---------------------------------------------------------------
+        // Fluent join API tests using CompositeKey.on()
+        // ---------------------------------------------------------------
+
+        @Test void innerJoinOnFluent() {
+            var joined = EMP_EXT.innerJoinOn(DEPT_EXT,
+                on(EmployeeExt::dept, EmployeeExt::location),
+                on(DepartmentExt::dept, DepartmentExt::location));
+            
+            assertEquals(3, joined.size()); // Alice, Charlie, Diana match
+            
+            // Verify same results as innerJoinMulti
+            var names = joined.stream()
+                .map(p -> p.left().name())
+                .sorted()
+                .toList();
+            assertEquals(List.of("Alice", "Charlie", "Diana"), names);
+        }
+
+        @Test void leftJoinOnFluent() {
+            var joined = EMP_EXT.leftJoinOn(DEPT_EXT,
+                on(EmployeeExt::dept, EmployeeExt::location),
+                on(DepartmentExt::dept, DepartmentExt::location));
+            
+            assertEquals(4, joined.size()); // All employees present
+            
+            long nullCount = joined.stream()
+                .filter(p -> p.right() == null)
+                .count();
+            assertEquals(1, nullCount); // Bob has no match
+        }
+
+        @Test void rightJoinOnFluent() {
+            var joined = EMP_EXT.rightJoinOn(DEPT_EXT,
+                on(EmployeeExt::dept, EmployeeExt::location),
+                on(DepartmentExt::dept, DepartmentExt::location));
+            
+            assertEquals(4, joined.size()); // All departments present
+            
+            // Sales-LA department has no matching employee
+            var salesLA = joined.stream()
+                .filter(p -> p.right() != null && 
+                            p.right().dept().equals("Sales") && 
+                            p.right().location().equals("LA"))
+                .findFirst().orElseThrow();
+            assertNull(salesLA.left());
+        }
+
+        @Test void fluentJoinWithThreeKeys() {
+            record Product(String category, String brand, String region, int price) {}
+            record Inventory(String category, String brand, String region, int stock) {}
+            
+            var products = Dataset.of(
+                new Product("Electronics", "Apple", "US", 999),
+                new Product("Electronics", "Samsung", "US", 799),
+                new Product("Clothing", "Nike", "EU", 120)
+            );
+            
+            var inventory = Dataset.of(
+                new Inventory("Electronics", "Apple", "US", 50),
+                new Inventory("Electronics", "Samsung", "US", 25),
+                new Inventory("Clothing", "Adidas", "EU", 100)
+            );
+            
+            var joined = products.innerJoinOn(inventory,
+                on(Product::category, Product::brand, Product::region),
+                on(Inventory::category, Inventory::brand, Inventory::region));
+            
+            assertEquals(2, joined.size()); // Apple and Samsung match, Nike doesn't
+            
+            var appleJoin = joined.stream()
+                .filter(p -> p.left().brand().equals("Apple"))
+                .findFirst().orElseThrow();
+            assertEquals(50, appleJoin.right().stock());
+        }
+
+        @Test void fluentJoinWithFourKeys() {
+            record OrderExt(String dept, String location, String quarter, String product) {}
+            record BudgetExt(String dept, String location, String quarter, String product, int amount) {}
+            
+            var orders = Dataset.of(
+                new OrderExt("Eng", "SF", "Q1", "Laptop"),
+                new OrderExt("Sales", "NYC", "Q2", "Phone")
+            );
+            
+            var budgets = Dataset.of(
+                new BudgetExt("Eng", "SF", "Q1", "Laptop", 5000),
+                new BudgetExt("Sales", "LA", "Q2", "Phone", 3000) // different location
+            );
+            
+            var joined = orders.innerJoinOn(budgets,
+                on(OrderExt::dept, OrderExt::location, OrderExt::quarter, OrderExt::product),
+                on(BudgetExt::dept, BudgetExt::location, BudgetExt::quarter, BudgetExt::product));
+            
+            assertEquals(1, joined.size()); // Only Eng-SF-Q1-Laptop matches
+            assertEquals(5000, joined.get(0).right().amount());
+        }
     }
 
     // -----------------------------------------------------------------

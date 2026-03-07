@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.dataset4j</groupId>
+    <groupId>io.github.amah</groupId>
     <artifactId>dataset4j</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
@@ -14,18 +14,40 @@
         A lightweight, zero-dependency DataFrame-like library for Java.
         Port Pandas data processing pipelines to Java using records, streams, and a fluent API.
     </description>
-    <url>https://github.com/YOUR_USERNAME/dataset4j</url>
+    <url>https://github.com/amah/dataset4j</url>
 
     <licenses>
         <license>
             <name>MIT License</name>
             <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
         </license>
     </licenses>
 
+    <developers>
+        <developer>
+            <id>amah</id>
+            <name>Amah</name>
+            <email>amah.ahite@gmail.com</email>
+            <url>https://github.com/amah</url>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:git://github.com/amah/dataset4j.git</connection>
+        <developerConnection>scm:git:ssh://github.com:amah/dataset4j.git</developerConnection>
+        <url>https://github.com/amah/dataset4j/tree/main</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub</system>
+        <url>https://github.com/amah/dataset4j/issues</url>
+    </issueManagement>
+
     <properties>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.11.4</junit.version>
     </properties>
@@ -39,6 +61,8 @@
         </dependency>
     </dependencies>
 
+    <!-- No distributionManagement needed for Central Portal -->
+
     <build>
         <plugins>
             <plugin>
@@ -46,8 +70,8 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
                 <configuration>
-                    <source>21</source>
-                    <target>21</target>
+                    <source>17</source>
+                    <target>17</target>
                 </configuration>
             </plugin>
             <plugin>
@@ -60,7 +84,7 @@
                 <artifactId>maven-javadoc-plugin</artifactId>
                 <version>3.11.2</version>
                 <configuration>
-                    <source>21</source>
+                    <source>17</source>
                 </configuration>
             </plugin>
             <plugin>
@@ -74,6 +98,59 @@
                     </execution>
                 </executions>
             </plugin>
+            
+            <!-- Central Publishing Plugin (replaces Nexus Staging Plugin) -->
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>0.6.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                    <autoPublish>true</autoPublish>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <!-- Maven GPG Plugin for signing artifacts -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.4</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    
+                    <!-- Central Publishing Plugin handles deployment in release profile -->
+                    
+                    <!-- Maven Release Plugin -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-release-plugin</artifactId>
+                        <version>3.1.1</version>
+                        <configuration>
+                            <autoVersionSubmodules>true</autoVersionSubmodules>
+                            <useReleaseProfile>false</useReleaseProfile>
+                            <releaseProfiles>release</releaseProfiles>
+                            <goals>deploy</goals>
+                            <scmCommentPrefix>[maven-release-plugin] </scmCommentPrefix>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

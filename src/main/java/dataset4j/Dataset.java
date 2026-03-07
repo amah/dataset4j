@@ -84,12 +84,12 @@ public class Dataset<T> implements Iterable<T> {
 
     /** df.iloc[0] */
     public Optional<T> first() {
-        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.getFirst());
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
     /** df.iloc[-1] */
     public Optional<T> last() {
-        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.getLast());
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(rows.size() - 1));
     }
 
     @Override
@@ -466,64 +466,132 @@ public class Dataset<T> implements Iterable<T> {
             .toList());
     }
 
+
     // ---------------------------------------------------------------
-    // Three-way joins returning Triplet
+    // Multi-key joins using CompositeKey
     // ---------------------------------------------------------------
 
     /**
-     * Three-way inner join: A ⋈ B ⋈ C
+     * Inner join on multiple keys using CompositeKey.
      *
      * <pre>
-     * // employee → department → budget
-     * Dataset&lt;Triplet&lt;Employee, Department, Budget&gt;&gt; enriched =
-     *     employees.innerJoin3(
-     *         departments, Employee::dept,   Department::dept,
-     *         budgets,     Department::dept,  Budget::dept);
-     *
-     * enriched.map(t -> t.first().name() + " budget=" + t.third().amount());
+     * import static dataset4j.CompositeKey.key;
+     * 
+     * // Join on both dept AND location
+     * employees.innerJoinMulti(departments,
+     *     e -> key(e.dept(), e.location()),
+     *     d -> key(d.dept(), d.location()));
      * </pre>
-     *
-     * @param right1    first dataset to join
-     * @param leftKey1  key from this dataset for first join
-     * @param rightKey1 key from right1 for first join
-     * @param right2    second dataset to join
-     * @param midKey    key from right1's row for second join
-     * @param rightKey2 key from right2 for second join
      */
-    public <R1, R2, K1, K2> Dataset<Triplet<T, R1, R2>> innerJoin3(
-            Dataset<R1> right1,
-            Function<T, K1> leftKey1,
-            Function<R1, K1> rightKey1,
-            Dataset<R2> right2,
-            Function<R1, K2> midKey,
-            Function<R2, K2> rightKey2) {
-        // First join: T ⋈ R1 → Pair<T, R1>
-        // Second join: Pair<T, R1> ⋈ R2 → Triplet<T, R1, R2>
-        return this.innerJoin(right1, leftKey1, rightKey1)
-            .innerJoin(right2,
-                pair -> midKey.apply(pair.right()),
-                rightKey2,
-                (pair, r2) -> new Triplet<>(pair.left(), pair.right(), r2));
+    public <R> Dataset<Pair<T, R>> innerJoinMulti(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKey,
+            Function<R, CompositeKey> rightKey) {
+        return innerJoin(right, leftKey, rightKey);
     }
 
     /**
-     * Three-way left join: A ⟕ B ⟕ C
-     *
-     * Both {@code triplet.second()} and {@code triplet.third()} may be null
-     * when there is no match.
+     * Left join on multiple keys using CompositeKey.
      */
-    public <R1, R2, K1, K2> Dataset<Triplet<T, R1, R2>> leftJoin3(
-            Dataset<R1> right1,
-            Function<T, K1> leftKey1,
-            Function<R1, K1> rightKey1,
-            Dataset<R2> right2,
-            Function<R1, K2> midKey,
-            Function<R2, K2> rightKey2) {
-        return this.leftJoin(right1, leftKey1, rightKey1)
-            .leftJoin(right2,
-                pair -> pair.right() != null ? midKey.apply(pair.right()) : null,
-                rightKey2,
-                (pair, r2) -> new Triplet<>(pair.left(), pair.right(), r2));
+    public <R> Dataset<Pair<T, R>> leftJoinMulti(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKey,
+            Function<R, CompositeKey> rightKey) {
+        return leftJoin(right, leftKey, rightKey);
+    }
+
+    /**
+     * Right join on multiple keys using CompositeKey.
+     */
+    public <R> Dataset<Pair<T, R>> rightJoinMulti(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKey,
+            Function<R, CompositeKey> rightKey) {
+        return rightJoin(right, leftKey, rightKey);
+    }
+
+    /**
+     * Inner join on exactly 2 keys (convenience method).
+     *
+     * <pre>
+     * employees.innerJoin2(departments,
+     *     Employee::dept, Employee::location,
+     *     Department::dept, Department::location);
+     * </pre>
+     */
+    public <R, K1, K2> Dataset<Pair<T, R>> innerJoin2(
+            Dataset<R> right,
+            Function<T, K1> leftKey1, Function<T, K2> leftKey2,
+            Function<R, K1> rightKey1, Function<R, K2> rightKey2) {
+        return innerJoin(right,
+            row -> CompositeKey.of(leftKey1.apply(row), leftKey2.apply(row)),
+            row -> CompositeKey.of(rightKey1.apply(row), rightKey2.apply(row)));
+    }
+
+    /**
+     * Left join on exactly 2 keys (convenience method).
+     */
+    public <R, K1, K2> Dataset<Pair<T, R>> leftJoin2(
+            Dataset<R> right,
+            Function<T, K1> leftKey1, Function<T, K2> leftKey2,
+            Function<R, K1> rightKey1, Function<R, K2> rightKey2) {
+        return leftJoin(right,
+            row -> CompositeKey.of(leftKey1.apply(row), leftKey2.apply(row)),
+            row -> CompositeKey.of(rightKey1.apply(row), rightKey2.apply(row)));
+    }
+
+    /**
+     * Inner join on exactly 3 keys (convenience method).
+     */
+    public <R, K1, K2, K3> Dataset<Pair<T, R>> innerJoin3Keys(
+            Dataset<R> right,
+            Function<T, K1> leftKey1, Function<T, K2> leftKey2, Function<T, K3> leftKey3,
+            Function<R, K1> rightKey1, Function<R, K2> rightKey2, Function<R, K3> rightKey3) {
+        return innerJoin(right,
+            row -> CompositeKey.of(leftKey1.apply(row), leftKey2.apply(row), leftKey3.apply(row)),
+            row -> CompositeKey.of(rightKey1.apply(row), rightKey2.apply(row), rightKey3.apply(row)));
+    }
+
+    // ---------------------------------------------------------------
+    // Fluent join methods using CompositeKey.on()
+    // ---------------------------------------------------------------
+
+    /**
+     * Inner join with fluent key specification using property accessors.
+     *
+     * <pre>
+     * import static dataset4j.CompositeKey.on;
+     * 
+     * employees.innerJoinOn(departments,
+     *     on(Employee::dept, Employee::location),
+     *     on(Department::dept, Department::location));
+     * </pre>
+     */
+    public <R> Dataset<Pair<T, R>> innerJoinOn(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKeyFactory,
+            Function<R, CompositeKey> rightKeyFactory) {
+        return innerJoin(right, leftKeyFactory, rightKeyFactory);
+    }
+
+    /**
+     * Left join with fluent key specification using property accessors.
+     */
+    public <R> Dataset<Pair<T, R>> leftJoinOn(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKeyFactory,
+            Function<R, CompositeKey> rightKeyFactory) {
+        return leftJoin(right, leftKeyFactory, rightKeyFactory);
+    }
+
+    /**
+     * Right join with fluent key specification using property accessors.
+     */
+    public <R> Dataset<Pair<T, R>> rightJoinOn(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKeyFactory,
+            Function<R, CompositeKey> rightKeyFactory) {
+        return rightJoin(right, leftKeyFactory, rightKeyFactory);
     }
 
     // ---------------------------------------------------------------

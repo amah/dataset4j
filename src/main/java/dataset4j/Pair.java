@@ -53,10 +53,6 @@ public record Pair<L, R>(L left, R right) {
         return left != null;
     }
 
-    /** Flatten into a Triplet by appending a third value. */
-    public <T> Triplet<L, R, T> withThird(T third) {
-        return new Triplet<>(left, right, third);
-    }
 
     /** Destructure with positional accessors (alias for left/right). */
     public L first()  { return left; }
