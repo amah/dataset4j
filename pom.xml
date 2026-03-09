@@ -6,7 +6,7 @@
 
     <groupId>io.github.amah</groupId>
     <artifactId>dataset4j-parent</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <packaging>pom</packaging>
 
     <name>dataset4j-parent</name>
@@ -234,6 +234,12 @@
     <profiles>
         <profile>
             <id>release</id>
+            <modules>
+                <module>dataset4j-core</module>
+                <module>dataset4j-poi</module>
+                <module>dataset4j-parquet</module>
+                <module>dataset4j</module>
+            </modules>
             <build>
                 <plugins>
                     <!-- Maven GPG Plugin for signing artifacts -->
