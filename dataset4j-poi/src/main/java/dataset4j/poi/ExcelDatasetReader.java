@@ -72,6 +72,15 @@ public class ExcelDatasetReader {
     }
     
     /**
+     * Alias for headers() method.
+     * @param hasHeaders true if first row has headers
+     * @return this reader for chaining
+     */
+    public ExcelDatasetReader hasHeaders(boolean hasHeaders) {
+        return headers(hasHeaders);
+    }
+    
+    /**
      * Specify starting row index (0-based).
      * @param startRow row index to start reading from
      * @return this reader for chaining
@@ -79,6 +88,17 @@ public class ExcelDatasetReader {
     public ExcelDatasetReader startRow(int startRow) {
         this.startRow = startRow;
         return this;
+    }
+    
+    /**
+     * Read Excel data into Dataset of specified record type.
+     * @param <T> record type
+     * @param recordClass record class with @DataColumn annotations
+     * @return Dataset containing parsed records
+     * @throws IOException if file cannot be read
+     */
+    public <T> Dataset<T> read(Class<T> recordClass) throws IOException {
+        return readAs(recordClass);
     }
     
     /**
