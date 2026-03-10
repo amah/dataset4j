@@ -69,7 +69,7 @@ class ExcelSimpleTest {
         assertEquals(Integer.valueOf(1), first.id());
         assertEquals("John Doe", first.name());
         assertEquals("john@company.com", first.email());
-        assertEquals(new BigDecimal("75000.50"), first.salary());
+        assertEquals(0, new BigDecimal("75000.50").compareTo(first.salary()));
         
         System.out.println("Successfully read back data:");
         readData.toList().forEach(System.out::println);

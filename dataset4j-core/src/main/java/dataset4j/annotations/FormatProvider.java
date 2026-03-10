@@ -105,6 +105,8 @@ public final class FormatProvider {
                 return LocalDateTime.parse(trimmed, getDateTimeFormatter(metadata.getDateFormat()));
             } else if (fieldType == Date.class) {
                 return getDateFormat(metadata.getDateFormat()).parse(trimmed);
+            } else if (fieldType == java.math.BigDecimal.class) {
+                return new java.math.BigDecimal(trimmed);
             }
             
             // Fallback: try to create from string

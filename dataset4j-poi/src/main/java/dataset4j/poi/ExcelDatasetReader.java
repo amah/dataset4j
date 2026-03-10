@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.lang.reflect.RecordComponent;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -195,8 +196,9 @@ public class ExcelDatasetReader {
     }
     
     private int getColumnIndex(ColumnMetadata columnMeta) {
-        // Use explicit column index if specified, otherwise use order
-        return columnMeta.getOrder() >= 0 ? columnMeta.getOrder() : 0;
+        // Convert 1-based @DataColumn order to 0-based Excel column index
+        // Excel columns are 0-based (A=0, B=1, C=2, etc.) but @DataColumn order is 1-based
+        return columnMeta.getOrder() > 0 ? columnMeta.getOrder() - 1 : 0;
     }
     
     private Object parseCellValue(Cell cell, Class<?> targetType, ColumnMetadata columnMeta) {
@@ -211,7 +213,12 @@ public class ExcelDatasetReader {
         
         // Use FormatProvider for parsing if available
         try {
-            return dataset4j.annotations.FormatProvider.parseValue(cellValue, columnMeta);
+            Object result = dataset4j.annotations.FormatProvider.parseValue(cellValue, columnMeta);
+            // If FormatProvider returned a String but we need something else, try basic parsing
+            if (result instanceof String && targetType != String.class) {
+                return parseBasicValue(cellValue, targetType);
+            }
+            return result;
         } catch (Exception e) {
             // Fallback to basic parsing
             return parseBasicValue(cellValue, targetType);
@@ -223,7 +230,7 @@ public class ExcelDatasetReader {
             case STRING -> cell.getStringCellValue();
             case NUMERIC -> {
                 if (DateUtil.isCellDateFormatted(cell)) {
-                    yield cell.getDateCellValue().toString();
+                    yield cell.getLocalDateTimeCellValue().toLocalDate().toString();
                 } else {
                     double numValue = cell.getNumericCellValue();
                     if (numValue == (long) numValue) {
@@ -258,6 +265,36 @@ public class ExcelDatasetReader {
         if (type == long.class || type == Long.class) return Long.parseLong(value);
         if (type == double.class || type == Double.class) return Double.parseDouble(value);
         if (type == boolean.class || type == Boolean.class) return Boolean.parseBoolean(value);
+        if (type == java.math.BigDecimal.class) return new java.math.BigDecimal(value);
+        if (type == java.time.LocalDate.class) {
+            try {
+                // First try to parse as ISO date
+                return java.time.LocalDate.parse(value, java.time.format.DateTimeFormatter.ISO_LOCAL_DATE);
+            } catch (Exception e) {
+                // If that fails, try to parse as Excel serial date number
+                try {
+                    double serialDate = Double.parseDouble(value);
+                    // Excel epoch is January 1, 1900, but has a leap year bug (treats 1900 as leap year)
+                    // Use POI's utility to convert Excel serial date to LocalDate
+                    java.util.Date date = org.apache.poi.ss.usermodel.DateUtil.getJavaDate(serialDate);
+                    LocalDate localDate = date.toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+                    
+                    // Workaround for Excel 1900 leap year bug
+                    // Excel incorrectly treats 1900 as a leap year, which shifts dates
+                    // For dates on or before 1900-02-28, we need to add one day
+                    if (serialDate <= 60) { // 60 is March 1, 1900 in Excel
+                        localDate = localDate.plusDays(1);
+                    }
+                    
+                    return localDate;
+                } catch (Exception ex) {
+                    throw new IllegalArgumentException("Could not parse date: " + value, ex);
+                }
+            }
+        }
+        if (type == java.time.LocalDateTime.class) {
+            return java.time.LocalDateTime.parse(value, java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+        }
         return value;
     }
     
@@ -267,6 +304,9 @@ public class ExcelDatasetReader {
         if (type == long.class) return 0L;
         if (type == double.class) return 0.0;
         if (type == boolean.class) return false;
+        if (type == java.math.BigDecimal.class) return java.math.BigDecimal.ZERO;
+        if (type == java.time.LocalDate.class) return null;
+        if (type == java.time.LocalDateTime.class) return null;
         return null;
     }
 }

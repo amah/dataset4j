@@ -202,8 +202,14 @@ public class ExcelDatasetWriter {
      * @throws IOException if file cannot be written
      */
     public <T> void write(Dataset<T> dataset) throws IOException {
+        // Handle empty dataset - just create an empty Excel file
         if (dataset.isEmpty()) {
-            throw new IllegalArgumentException("Cannot write empty dataset");
+            try (Workbook workbook = new XSSFWorkbook();
+                 FileOutputStream fos = new FileOutputStream(filePath)) {
+                workbook.createSheet(sheetName);
+                workbook.write(fos);
+            }
+            return;
         }
         
         Class<?> recordClass = dataset.toList().get(0).getClass();
