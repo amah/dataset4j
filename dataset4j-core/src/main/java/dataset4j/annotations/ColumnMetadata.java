@@ -24,6 +24,7 @@ public final class ColumnMetadata {
     // Format-specific metadata
     private final String numberFormat;
     private final String dateFormat;
+    private final String[] alternativeDateFormats;
     private final int maxLength;
     
     private ColumnMetadata(Builder builder) {
@@ -38,6 +39,7 @@ public final class ColumnMetadata {
         this.fieldType = builder.fieldType;
         this.numberFormat = builder.numberFormat;
         this.dateFormat = builder.dateFormat;
+        this.alternativeDateFormats = builder.alternativeDateFormats;
         this.maxLength = builder.maxLength;
     }
     
@@ -63,6 +65,8 @@ public final class ColumnMetadata {
     public String getNumberFormat() { return numberFormat; }
     /** @return the date format pattern */
     public String getDateFormat() { return dateFormat; }
+    /** @return the alternative date format patterns */
+    public String[] getAlternativeDateFormats() { return alternativeDateFormats; }
     /** @return the maximum field length */
     public int getMaxLength() { return maxLength; }
     
@@ -124,6 +128,7 @@ public final class ColumnMetadata {
         private String defaultValue = "";
         private String numberFormat = "";
         private String dateFormat = "yyyy-MM-dd";
+        private String[] alternativeDateFormats = {};
         private int maxLength = -1;
         
         /** Constructor. @param recordComponent the record component */
@@ -181,6 +186,11 @@ public final class ColumnMetadata {
             return this;
         }
         
+        /** @param alternativeDateFormats alternative date formats @return this builder */
+        public Builder alternativeDateFormats(String[] alternativeDateFormats) {
+            this.alternativeDateFormats = alternativeDateFormats != null ? alternativeDateFormats : new String[0];
+            return this;
+        }
         
         /** @param maxLength max length @return this builder */
         public Builder maxLength(int maxLength) {

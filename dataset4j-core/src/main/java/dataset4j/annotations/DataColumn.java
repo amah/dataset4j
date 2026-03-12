@@ -104,6 +104,19 @@ public @interface DataColumn {
     String dateFormat() default "yyyy-MM-dd";
     
     /**
+     * Alternative date format patterns to try when parsing date fields.
+     * The parser will try the primary dateFormat first, then these alternatives
+     * in order until a successful parse occurs.
+     * 
+     * Example usage:
+     * {@code @DataColumn(dateFormat = "yyyy-MM-dd", 
+     *                    alternativeDateFormats = {"MM/dd/yyyy", "dd-MMM-yyyy"})}
+     * 
+     * @return array of alternative date format patterns
+     */
+    String[] alternativeDateFormats() default {};
+    
+    /**
      * Background color (hex format: #RRGGBB or standard color name).
      * @return the background color
      */

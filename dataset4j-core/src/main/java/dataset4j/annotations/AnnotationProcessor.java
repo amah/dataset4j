@@ -165,6 +165,9 @@ public final class AnnotationProcessor {
             if (!dataColumn.dateFormat().isEmpty()) {
                 builder.dateFormat(dataColumn.dateFormat());
             }
+            if (dataColumn.alternativeDateFormats().length > 0) {
+                builder.alternativeDateFormats(dataColumn.alternativeDateFormats());
+            }
             if (dataColumn.width() != -1) {
                 builder.maxLength(dataColumn.width());
             }

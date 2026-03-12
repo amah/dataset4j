@@ -4,6 +4,8 @@ import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
+import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.HashMap;
@@ -95,16 +97,15 @@ public final class FormatProvider {
             } else if (fieldType == boolean.class || fieldType == Boolean.class) {
                 return Boolean.parseBoolean(trimmed);
             } else if (fieldType == LocalDate.class) {
-                return LocalDate.parse(trimmed, getDateTimeFormatter(metadata.getDateFormat()));
+                return parseLocalDate(trimmed, metadata);
             } else if (fieldType == LocalDateTime.class) {
-                // Handle both date-only and date-time formats
-                if (trimmed.length() == 10) { // Date only format (yyyy-MM-dd)
-                    LocalDate date = LocalDate.parse(trimmed, getDateTimeFormatter("yyyy-MM-dd"));
-                    return date.atStartOfDay();
-                }
-                return LocalDateTime.parse(trimmed, getDateTimeFormatter(metadata.getDateFormat()));
+                return parseLocalDateTime(trimmed, metadata);
+            } else if (fieldType == ZonedDateTime.class) {
+                return parseZonedDateTime(trimmed, metadata);
+            } else if (fieldType == OffsetDateTime.class) {
+                return parseOffsetDateTime(trimmed, metadata);
             } else if (fieldType == Date.class) {
-                return getDateFormat(metadata.getDateFormat()).parse(trimmed);
+                return parseDate(trimmed, metadata);
             } else if (fieldType == java.math.BigDecimal.class) {
                 return new java.math.BigDecimal(trimmed);
             }
@@ -145,6 +146,10 @@ public final class FormatProvider {
                 return ((LocalDate) value).format(getDateTimeFormatter(pattern));
             } else if (value instanceof LocalDateTime) {
                 return ((LocalDateTime) value).format(getDateTimeFormatter(pattern));
+            } else if (value instanceof ZonedDateTime) {
+                return ((ZonedDateTime) value).format(getDateTimeFormatter(pattern));
+            } else if (value instanceof OffsetDateTime) {
+                return ((OffsetDateTime) value).format(getDateTimeFormatter(pattern));
             } else if (value instanceof Date) {
                 return getDateFormat(pattern).format((Date) value);
             }
@@ -171,6 +176,8 @@ public final class FormatProvider {
     public static boolean isDate(Class<?> type) {
         return type == LocalDate.class ||
                type == LocalDateTime.class ||
+               type == ZonedDateTime.class ||
+               type == OffsetDateTime.class ||
                type == Date.class;
     }
     
@@ -193,6 +200,165 @@ public final class FormatProvider {
      */
     private static DateTimeFormatter getDateTimeFormatter(String pattern) {
         return dateTimeFormatCache.computeIfAbsent(pattern, DateTimeFormatter::ofPattern);
+    }
+    
+    /**
+     * Parse a LocalDate with multiple format attempts.
+     */
+    private static LocalDate parseLocalDate(String value, ColumnMetadata metadata) {
+        // Try primary format first
+        try {
+            return LocalDate.parse(value, getDateTimeFormatter(metadata.getDateFormat()));
+        } catch (Exception ignored) {
+            // Try alternative formats
+        }
+        
+        // Try alternative formats
+        for (String format : metadata.getAlternativeDateFormats()) {
+            try {
+                return LocalDate.parse(value, getDateTimeFormatter(format));
+            } catch (Exception ignored) {
+                // Continue to next format
+            }
+        }
+        
+        // If all formats failed, throw exception with details
+        throw new IllegalArgumentException(
+            String.format("Unable to parse date '%s' with format '%s' or alternatives %s",
+                value, metadata.getDateFormat(), 
+                java.util.Arrays.toString(metadata.getAlternativeDateFormats())));
+    }
+    
+    /**
+     * Parse a LocalDateTime with multiple format attempts.
+     */
+    private static LocalDateTime parseLocalDateTime(String value, ColumnMetadata metadata) {
+        // Handle date-only format (yyyy-MM-dd) special case
+        if (value.length() == 10) {
+            try {
+                LocalDate date = LocalDate.parse(value, getDateTimeFormatter("yyyy-MM-dd"));
+                return date.atStartOfDay();
+            } catch (Exception ignored) {
+                // Not a simple date format, continue with normal parsing
+            }
+        }
+        
+        // Try primary format first
+        try {
+            return LocalDateTime.parse(value, getDateTimeFormatter(metadata.getDateFormat()));
+        } catch (Exception ignored) {
+            // Try alternative formats
+        }
+        
+        // Try alternative formats
+        for (String format : metadata.getAlternativeDateFormats()) {
+            try {
+                return LocalDateTime.parse(value, getDateTimeFormatter(format));
+            } catch (Exception ignored) {
+                // Continue to next format
+            }
+        }
+        
+        // If all formats failed, throw exception with details
+        throw new IllegalArgumentException(
+            String.format("Unable to parse datetime '%s' with format '%s' or alternatives %s",
+                value, metadata.getDateFormat(), 
+                java.util.Arrays.toString(metadata.getAlternativeDateFormats())));
+    }
+    
+    /**
+     * Parse a ZonedDateTime with multiple format attempts.
+     */
+    private static ZonedDateTime parseZonedDateTime(String value, ColumnMetadata metadata) {
+        // Try primary format first
+        try {
+            return ZonedDateTime.parse(value, getDateTimeFormatter(metadata.getDateFormat()));
+        } catch (Exception ignored) {
+            // Try alternative formats
+        }
+        
+        // Try alternative formats
+        for (String format : metadata.getAlternativeDateFormats()) {
+            try {
+                return ZonedDateTime.parse(value, getDateTimeFormatter(format));
+            } catch (Exception ignored) {
+                // Continue to next format
+            }
+        }
+        
+        // Try ISO-8601 formats as fallback
+        try {
+            return ZonedDateTime.parse(value); // Default ISO parser
+        } catch (Exception ignored) {
+            // Continue
+        }
+        
+        // If all formats failed, throw exception with details
+        throw new IllegalArgumentException(
+            String.format("Unable to parse ZonedDateTime '%s' with format '%s' or alternatives %s",
+                value, metadata.getDateFormat(), 
+                java.util.Arrays.toString(metadata.getAlternativeDateFormats())));
+    }
+    
+    /**
+     * Parse an OffsetDateTime with multiple format attempts.
+     */
+    private static OffsetDateTime parseOffsetDateTime(String value, ColumnMetadata metadata) {
+        // Try primary format first
+        try {
+            return OffsetDateTime.parse(value, getDateTimeFormatter(metadata.getDateFormat()));
+        } catch (Exception ignored) {
+            // Try alternative formats
+        }
+        
+        // Try alternative formats
+        for (String format : metadata.getAlternativeDateFormats()) {
+            try {
+                return OffsetDateTime.parse(value, getDateTimeFormatter(format));
+            } catch (Exception ignored) {
+                // Continue to next format
+            }
+        }
+        
+        // Try ISO-8601 formats as fallback
+        try {
+            return OffsetDateTime.parse(value); // Default ISO parser
+        } catch (Exception ignored) {
+            // Continue
+        }
+        
+        // If all formats failed, throw exception with details
+        throw new IllegalArgumentException(
+            String.format("Unable to parse OffsetDateTime '%s' with format '%s' or alternatives %s",
+                value, metadata.getDateFormat(), 
+                java.util.Arrays.toString(metadata.getAlternativeDateFormats())));
+    }
+    
+    /**
+     * Parse a Date with multiple format attempts.
+     */
+    private static Date parseDate(String value, ColumnMetadata metadata) {
+        // Try primary format first
+        try {
+            return getDateFormat(metadata.getDateFormat()).parse(value);
+        } catch (Exception ignored) {
+            // Try alternative formats
+        }
+        
+        // Try alternative formats
+        for (String format : metadata.getAlternativeDateFormats()) {
+            try {
+                return getDateFormat(format).parse(value);
+            } catch (Exception ignored) {
+                // Continue to next format
+            }
+        }
+        
+        // If all formats failed, throw exception with details
+        throw new IllegalArgumentException(
+            String.format("Unable to parse date '%s' with format '%s' or alternatives %s",
+                value, metadata.getDateFormat(), 
+                java.util.Arrays.toString(metadata.getAlternativeDateFormats())));
     }
     
     /**

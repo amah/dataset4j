@@ -58,6 +58,19 @@ public class Dataset<T> implements Iterable<T> {
         return new Dataset<>(all);
     }
 
+    /**
+     * Returns a copy of this Dataset.
+     * Since Dataset is immutable, this simply returns the same instance.
+     * 
+     * This method is provided for API consistency and to make the immutable
+     * nature of Dataset explicit.
+     * 
+     * @return this Dataset instance (no actual copy is needed)
+     */
+    public Dataset<T> copy() {
+        return this;
+    }
+
     // ---------------------------------------------------------------
     // Basic properties
     // ---------------------------------------------------------------
