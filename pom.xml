@@ -49,7 +49,6 @@
         <module>dataset4j-core</module>
         <module>dataset4j-poi</module>
         <module>dataset4j-parquet</module>
-        <module>dataset4j-examples</module>
         <module>dataset4j</module>
     </modules>
 
