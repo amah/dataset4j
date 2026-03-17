@@ -353,6 +353,157 @@ class DatasetTest {
     }
 
     // -----------------------------------------------------------------
+    // Multi-key GroupBy & CountDistinct
+    // -----------------------------------------------------------------
+
+    @Nested class MultiKeyGroupByAndCountDistinct {
+
+        record EmpFull(String name, int age, String dept, String location, String role) {}
+
+        static final Dataset<EmpFull> EMP_FULL = Dataset.of(
+            new EmpFull("Alice",   30, "Eng",   "SF",  "Backend"),
+            new EmpFull("Bob",     25, "Sales", "NYC", "Account Exec"),
+            new EmpFull("Charlie", 35, "Eng",   "NYC", "Frontend"),
+            new EmpFull("Diana",   28, "Sales", "SF",  "Account Exec"),
+            new EmpFull("Eve",     32, "Eng",   "SF",  "Backend"),
+            new EmpFull("Frank",   27, "Eng",   "SF",  "Frontend")
+        );
+
+        // -- groupBy overloads --
+
+        @Test void groupByTwoKeys() {
+            var grouped = EMP_FULL.groupBy(EmpFull::dept, EmpFull::location);
+            assertEquals(4, grouped.size()); // Eng-SF, Eng-NYC, Sales-NYC, Sales-SF
+            // Eng-SF has Alice, Eve, Frank
+            var engSf = grouped.get(CompositeKey.of("Eng", "SF"));
+            assertEquals(3, engSf.size());
+        }
+
+        @Test void groupByThreeKeys() {
+            var grouped = EMP_FULL.groupBy(EmpFull::dept, EmpFull::location, EmpFull::role);
+            // Eng-SF-Backend(Alice,Eve), Eng-SF-Frontend(Frank), Eng-NYC-Frontend(Charlie),
+            // Sales-NYC-Account Exec(Bob), Sales-SF-Account Exec(Diana)
+            assertEquals(5, grouped.size());
+            var engSfBackend = grouped.get(CompositeKey.of("Eng", "SF", "Backend"));
+            assertEquals(2, engSfBackend.size());
+        }
+
+        @Test void groupByCompositeKeyFactory() {
+            var grouped = EMP_FULL.groupByOn(
+                on(EmpFull::dept, EmpFull::location));
+            assertEquals(4, grouped.size());
+            assertEquals(3, grouped.get(CompositeKey.of("Eng", "SF")).size());
+        }
+
+        @Test void groupByTwoKeysAggregation() {
+            var counts = EMP_FULL.groupBy(EmpFull::dept, EmpFull::location).counts();
+            assertEquals(3, counts.get(CompositeKey.of("Eng", "SF")));
+            assertEquals(1, counts.get(CompositeKey.of("Eng", "NYC")));
+            assertEquals(1, counts.get(CompositeKey.of("Sales", "NYC")));
+            assertEquals(1, counts.get(CompositeKey.of("Sales", "SF")));
+        }
+
+        @Test void groupByTwoKeysMeanInt() {
+            var means = EMP_FULL.groupBy(EmpFull::dept, EmpFull::location)
+                .meanInt(EmpFull::age);
+            // Eng-SF: (30+32+27)/3 = 29.667
+            assertEquals(29.667, means.get(CompositeKey.of("Eng", "SF")), 0.01);
+        }
+
+        @Test void groupByTwoKeysEmpty() {
+            var grouped = Dataset.<EmpFull>empty().groupBy(EmpFull::dept, EmpFull::location);
+            assertEquals(0, grouped.size());
+        }
+
+        @Test void groupByTwoKeysSingleRow() {
+            var ds = Dataset.of(new EmpFull("Alice", 30, "Eng", "SF", "Backend"));
+            var grouped = ds.groupBy(EmpFull::dept, EmpFull::location);
+            assertEquals(1, grouped.size());
+            assertEquals(1, grouped.get(CompositeKey.of("Eng", "SF")).size());
+        }
+
+        // -- countDistinct overloads on Dataset --
+
+        @Test void countDistinctTwoFields() {
+            // Distinct (dept, location) combos: Eng-SF, Eng-NYC, Sales-NYC, Sales-SF
+            assertEquals(4, EMP_FULL.countDistinct(EmpFull::dept, EmpFull::location));
+        }
+
+        @Test void countDistinctThreeFields() {
+            // Distinct (dept, location, role) combos: 5
+            assertEquals(5, EMP_FULL.countDistinct(EmpFull::dept, EmpFull::location, EmpFull::role));
+        }
+
+        @Test void countDistinctTwoFieldsWithDuplicates() {
+            // dept+role: Eng-Backend(2), Eng-Frontend(2), Sales-Account Exec(2) → 3 distinct
+            assertEquals(3, EMP_FULL.countDistinct(EmpFull::dept, EmpFull::role));
+        }
+
+        @Test void countDistinctTwoFieldsEmpty() {
+            assertEquals(0, Dataset.<EmpFull>empty().countDistinct(EmpFull::dept, EmpFull::location));
+        }
+
+        @Test void countDistinctTwoFieldsSingleRow() {
+            var ds = Dataset.of(new EmpFull("Alice", 30, "Eng", "SF", "Backend"));
+            assertEquals(1, ds.countDistinct(EmpFull::dept, EmpFull::location));
+        }
+
+        // -- countDistinct on GroupedDataset --
+
+        @Test void groupedCountDistinctSingleField() {
+            // Per dept, how many distinct locations?
+            var result = EMP_FULL.groupBy(EmpFull::dept)
+                .countDistinct(EmpFull::location);
+            assertEquals(2L, result.get("Eng"));   // SF, NYC
+            assertEquals(2L, result.get("Sales")); // NYC, SF
+        }
+
+        @Test void groupedCountDistinctSingleFieldWithDuplicates() {
+            // Per dept, how many distinct roles?
+            var result = EMP_FULL.groupBy(EmpFull::dept)
+                .countDistinct(EmpFull::role);
+            assertEquals(2L, result.get("Eng"));   // Backend, Frontend
+            assertEquals(1L, result.get("Sales")); // Account Exec
+        }
+
+        @Test void groupedCountDistinctTwoFields() {
+            // Per dept, how many distinct (location, role) combos?
+            var result = EMP_FULL.groupBy(EmpFull::dept)
+                .countDistinct(EmpFull::location, EmpFull::role);
+            // Eng: SF-Backend, SF-Frontend, NYC-Frontend → 3
+            assertEquals(3L, result.get("Eng"));
+            // Sales: NYC-Account Exec, SF-Account Exec → 2
+            assertEquals(2L, result.get("Sales"));
+        }
+
+        @Test void groupedCountDistinctThreeFields() {
+            // Per dept, how many distinct (location, role, name) combos?
+            // Each person is unique so: Eng=4, Sales=2
+            var result = EMP_FULL.groupBy(EmpFull::dept)
+                .countDistinct(EmpFull::location, EmpFull::role, EmpFull::name);
+            assertEquals(4L, result.get("Eng"));
+            assertEquals(2L, result.get("Sales"));
+        }
+
+        @Test void groupedCountDistinctEmpty() {
+            var result = Dataset.<EmpFull>empty()
+                .groupBy(EmpFull::dept)
+                .countDistinct(EmpFull::location);
+            assertTrue(result.isEmpty());
+        }
+
+        @Test void groupedCountDistinctAllSameValue() {
+            var ds = Dataset.of(
+                new EmpFull("A", 30, "Eng", "SF", "Dev"),
+                new EmpFull("B", 25, "Eng", "SF", "Dev"),
+                new EmpFull("C", 28, "Eng", "SF", "Dev")
+            );
+            var result = ds.groupBy(EmpFull::dept).countDistinct(EmpFull::location);
+            assertEquals(1L, result.get("Eng")); // all same location
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Joins with BiFunction (original API)
     // -----------------------------------------------------------------
 

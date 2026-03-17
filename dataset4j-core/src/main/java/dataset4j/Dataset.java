@@ -305,6 +305,20 @@ public class Dataset<T> implements Iterable<T> {
         return rows.stream().map(field).distinct().count();
     }
 
+    /** df[["col1", "col2"]].nunique() — count distinct combinations of 2 fields */
+    public <V1, V2> long countDistinct(Function<T, V1> field1, Function<T, V2> field2) {
+        return rows.stream()
+            .map(row -> CompositeKey.of(field1.apply(row), field2.apply(row)))
+            .distinct().count();
+    }
+
+    /** df[["col1", "col2", "col3"]].nunique() — count distinct combinations of 3 fields */
+    public <V1, V2, V3> long countDistinct(Function<T, V1> field1, Function<T, V2> field2, Function<T, V3> field3) {
+        return rows.stream()
+            .map(row -> CompositeKey.of(field1.apply(row), field2.apply(row), field3.apply(row)))
+            .distinct().count();
+    }
+
     /** df["col"].value_counts() */
     public <V> Map<V, Long> valueCounts(Function<T, V> field) {
         return rows.stream()
@@ -355,6 +369,40 @@ public class Dataset<T> implements Iterable<T> {
     public <K> GroupedDataset<K, T> groupBy(Function<T, K> key) {
         Map<K, List<T>> groups = rows.stream()
             .collect(Collectors.groupingBy(key, LinkedHashMap::new, Collectors.toList()));
+        return new GroupedDataset<>(groups);
+    }
+
+    /**
+     * df.groupby(["col1", "col2"]) — group by 2 keys using CompositeKey.
+     *
+     * <pre>
+     * employees.groupBy(Employee::dept, Employee::location);
+     * </pre>
+     */
+    public <K1, K2> GroupedDataset<CompositeKey, T> groupBy(
+            Function<T, K1> key1, Function<T, K2> key2) {
+        return groupBy(row -> CompositeKey.of(key1.apply(row), key2.apply(row)));
+    }
+
+    /**
+     * df.groupby(["col1", "col2", "col3"]) — group by 3 keys using CompositeKey.
+     */
+    public <K1, K2, K3> GroupedDataset<CompositeKey, T> groupBy(
+            Function<T, K1> key1, Function<T, K2> key2, Function<T, K3> key3) {
+        return groupBy(row -> CompositeKey.of(key1.apply(row), key2.apply(row), key3.apply(row)));
+    }
+
+    /**
+     * df.groupby(["col1", "col2"]) — group by CompositeKey factory (fluent API).
+     *
+     * <pre>
+     * import static dataset4j.CompositeKey.on;
+     * employees.groupByOn(on(Employee::dept, Employee::location));
+     * </pre>
+     */
+    public GroupedDataset<CompositeKey, T> groupByOn(Function<T, CompositeKey> keyFactory) {
+        Map<CompositeKey, List<T>> groups = rows.stream()
+            .collect(Collectors.groupingBy(keyFactory, LinkedHashMap::new, Collectors.toList()));
         return new GroupedDataset<>(groups);
     }
 
@@ -813,6 +861,34 @@ public class Dataset<T> implements Iterable<T> {
         public <V> Map<K, V> computePerGroup(Function<Dataset<T>, V> computation) {
             Map<K, V> result = new LinkedHashMap<>();
             groups.forEach((k, v) -> result.put(k, computation.apply(Dataset.of(v))));
+            return result;
+        }
+
+        /** df.groupby("col")["field"].nunique() — count distinct values per group */
+        public <V> Map<K, Long> countDistinct(Function<T, V> field) {
+            Map<K, Long> result = new LinkedHashMap<>();
+            groups.forEach((k, v) -> result.put(k,
+                v.stream().map(field).distinct().count()));
+            return result;
+        }
+
+        /** df.groupby("col")[["f1","f2"]].nunique() — count distinct combinations per group */
+        public <V1, V2> Map<K, Long> countDistinct(Function<T, V1> field1, Function<T, V2> field2) {
+            Map<K, Long> result = new LinkedHashMap<>();
+            groups.forEach((k, v) -> result.put(k,
+                v.stream()
+                    .map(row -> CompositeKey.of(field1.apply(row), field2.apply(row)))
+                    .distinct().count()));
+            return result;
+        }
+
+        /** df.groupby("col")[["f1","f2","f3"]].nunique() — count distinct combinations per group */
+        public <V1, V2, V3> Map<K, Long> countDistinct(Function<T, V1> field1, Function<T, V2> field2, Function<T, V3> field3) {
+            Map<K, Long> result = new LinkedHashMap<>();
+            groups.forEach((k, v) -> result.put(k,
+                v.stream()
+                    .map(row -> CompositeKey.of(field1.apply(row), field2.apply(row), field3.apply(row)))
+                    .distinct().count()));
             return result;
         }
 
