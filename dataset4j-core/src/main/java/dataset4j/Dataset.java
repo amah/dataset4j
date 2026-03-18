@@ -58,6 +58,14 @@ public class Dataset<T> implements Iterable<T> {
         return new Dataset<>(all);
     }
 
+    /** Instance concat: this.concat(other) — appends another dataset's rows to this one */
+    public Dataset<T> concat(Dataset<T> other) {
+        List<T> all = new ArrayList<>(rows.size() + other.rows.size());
+        all.addAll(rows);
+        all.addAll(other.rows);
+        return new Dataset<>(all);
+    }
+
     /**
      * Returns a copy of this Dataset.
      * Since Dataset is immutable, this simply returns the same instance.

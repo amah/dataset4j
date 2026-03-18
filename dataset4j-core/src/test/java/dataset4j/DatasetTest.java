@@ -49,6 +49,22 @@ class DatasetTest {
             assertEquals(2, Dataset.concat(ds1, ds2).size());
         }
 
+        @Test void instanceConcat() {
+            var ds1 = Dataset.of(new Employee("A", 1, "X"));
+            var ds2 = Dataset.of(new Employee("B", 2, "Y"), new Employee("C", 3, "Z"));
+            var result = ds1.concat(ds2);
+            assertEquals(3, result.size());
+            assertEquals("A", result.get(0).name());
+            assertEquals("B", result.get(1).name());
+            assertEquals("C", result.get(2).name());
+        }
+
+        @Test void instanceConcatWithEmpty() {
+            var ds = Dataset.of(new Employee("A", 1, "X"));
+            assertEquals(1, ds.concat(Dataset.empty()).size());
+            assertEquals(1, Dataset.<Employee>empty().concat(ds).size());
+        }
+
         @Test void immutability() {
             var list = new ArrayList<>(List.of(new Employee("A", 1, "X")));
             var ds = Dataset.of(list);
