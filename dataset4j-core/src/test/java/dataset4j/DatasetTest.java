@@ -268,6 +268,21 @@ class DatasetTest {
             assertEquals(5, result.size()); // all unique
         }
 
+        @Test void distinctByVarargs() {
+            record Row(String a, String b, String c, String d, String name) {}
+            var ds = Dataset.of(
+                new Row("X", "Y", "Z", "W", "Alice"),
+                new Row("X", "Y", "Z", "W", "Bob"),     // duplicate on 4 keys
+                new Row("X", "Y", "Z", "V", "Charlie"), // differs on 4th key
+                new Row("A", "B", "C", "D", "Diana")
+            );
+            var result = ds.distinctBy(Row::a, Row::b, Row::c, Row::d);
+            assertEquals(3, result.size());
+            assertEquals("Alice", result.get(0).name());   // keeps first
+            assertEquals("Charlie", result.get(1).name());
+            assertEquals("Diana", result.get(2).name());
+        }
+
         @Test void distinct() {
             var ds = Dataset.of(
                 new Employee("A", 1, "X"),

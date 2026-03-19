@@ -262,6 +262,20 @@ public class Dataset<T> implements Iterable<T> {
             .toList());
     }
 
+    /** df.drop_duplicates(subset=[col1, ..., colN]) — deduplicate on N keys */
+    @SafeVarargs
+    public final Dataset<T> distinctBy(Function<T, ?>... keys) {
+        if (keys.length == 0) throw new IllegalArgumentException("At least one key is required");
+        Set<CompositeKey> seen = new LinkedHashSet<>();
+        return new Dataset<>(rows.stream()
+            .filter(row -> {
+                Object[] values = new Object[keys.length];
+                for (int i = 0; i < keys.length; i++) values[i] = keys[i].apply(row);
+                return seen.add(CompositeKey.of(values));
+            })
+            .toList());
+    }
+
     /** df.drop_duplicates() — uses equals() */
     public Dataset<T> distinct() {
         return new Dataset<>(rows.stream().distinct().toList());
