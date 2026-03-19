@@ -1,5 +1,8 @@
 package dataset4j;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.function.Function;
@@ -221,5 +224,52 @@ public final class CompositeKey {
      */
     public Object get(int index) {
         return components[index];
+    }
+
+    /**
+     * Get a component as the specified type (0-based index).
+     */
+    public <V> V as(int index, Class<V> type) {
+        return type.cast(components[index]);
+    }
+
+    /** Get a component as a String. */
+    public String asString(int index) {
+        return as(index, String.class);
+    }
+
+    /** Get a component as an Integer. */
+    public Integer asInteger(int index) {
+        return as(index, Integer.class);
+    }
+
+    /** Get a component as a Long. */
+    public Long asLong(int index) {
+        return as(index, Long.class);
+    }
+
+    /** Get a component as a Double. */
+    public Double asDouble(int index) {
+        return as(index, Double.class);
+    }
+
+    /** Get a component as a Boolean. */
+    public Boolean asBoolean(int index) {
+        return as(index, Boolean.class);
+    }
+
+    /** Get a component as a LocalDate. */
+    public LocalDate asLocalDate(int index) {
+        return as(index, LocalDate.class);
+    }
+
+    /** Get a component as a LocalTime. */
+    public LocalTime asLocalTime(int index) {
+        return as(index, LocalTime.class);
+    }
+
+    /** Get a component as a LocalDateTime. */
+    public LocalDateTime asLocalDateTime(int index) {
+        return as(index, LocalDateTime.class);
     }
 }
