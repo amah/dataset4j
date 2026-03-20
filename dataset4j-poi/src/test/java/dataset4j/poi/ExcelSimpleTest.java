@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -102,6 +103,35 @@ class ExcelSimpleTest {
         assertEquals(Integer.valueOf(1), withNulls.id());
         assertEquals("John", withNulls.name());
         // Note: null handling depends on implementation
+    }
+
+    public record EventRecord(
+        @DataColumn(name = "Name", order = 1)
+        String name,
+        @DataColumn(name = "StartTime", order = 2)
+        LocalDateTime startTime
+    ) {}
+
+    @Test
+    void shouldPreserveTimeWhenReadingLocalDateTime() throws IOException {
+        // Given
+        Path excelFile = tempDir.resolve("datetime_test.xlsx");
+        LocalDateTime expected = LocalDateTime.of(2024, 6, 15, 14, 30, 0);
+        Dataset<EventRecord> original = Dataset.of(
+            new EventRecord("Meeting", expected)
+        );
+
+        ExcelDatasetWriter.toFile(excelFile.toString()).write(original);
+
+        // When
+        Dataset<EventRecord> readData = ExcelDatasetReader
+            .fromFile(excelFile.toString())
+            .hasHeaders(true)
+            .read(EventRecord.class);
+
+        // Then
+        LocalDateTime actual = readData.first().orElseThrow().startTime();
+        assertEquals(expected, actual, "Time component must not be stripped during Excel read");
     }
 
     @Test

@@ -259,10 +259,17 @@ public final class FormatProvider {
             }
         }
         
+        // Try ISO format as a last resort (e.g. values produced by LocalDateTime.toString())
+        try {
+            return LocalDateTime.parse(value);
+        } catch (Exception ignored) {
+            // Fall through to error
+        }
+
         // If all formats failed, throw exception with details
         throw new IllegalArgumentException(
             String.format("Unable to parse datetime '%s' with format '%s' or alternatives %s",
-                value, metadata.getDateFormat(), 
+                value, metadata.getDateFormat(),
                 java.util.Arrays.toString(metadata.getAlternativeDateFormats())));
     }
     

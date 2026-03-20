@@ -11,7 +11,9 @@ import java.io.IOException;
 import java.lang.reflect.RecordComponent;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Writes Dataset to Excel files using annotation-driven formatting.
@@ -248,19 +250,20 @@ public class ExcelDatasetWriter {
             
             Sheet sheet = workbook.createSheet(sheetName);
             CellStyle headerStyle = createHeaderStyle(workbook);
-            
+            Map<String, CellStyle> columnStyles = buildColumnStyles(fieldsToExport, workbook);
+
             int rowIndex = 0;
-            
+
             // Write headers
             if (includeHeaders) {
                 Row headerRow = sheet.createRow(rowIndex++);
                 writeHeaders(headerRow, fieldsToExport, headerStyle);
             }
-            
+
             // Write data rows
             for (T record : dataset.toList()) {
                 Row dataRow = sheet.createRow(rowIndex++);
-                writeDataRow(dataRow, record, fieldsToExport, workbook);
+                writeDataRow(dataRow, record, fieldsToExport, columnStyles);
             }
             
             // Apply column formatting
@@ -286,24 +289,22 @@ public class ExcelDatasetWriter {
         }
     }
     
-    private <T> void writeDataRow(Row row, T record, List<FieldMeta> fields, Workbook workbook) {
+    private <T> void writeDataRow(Row row, T record, List<FieldMeta> fields, Map<String, CellStyle> columnStyles) {
         RecordComponent[] components = record.getClass().getRecordComponents();
-        
+
         for (int i = 0; i < fields.size(); i++) {
             FieldMeta fieldMeta = fields.get(i);
             Cell cell = row.createCell(i);
-            
-            // Find corresponding record component
+
             RecordComponent component = findComponent(components, fieldMeta.getFieldName());
             if (component != null) {
                 try {
                     Object value = component.getAccessor().invoke(record);
-                    setCellValue(cell, value, fieldMeta, workbook);
+                    setCellValue(cell, value, fieldMeta, columnStyles.get(fieldMeta.getFieldName()));
                 } catch (Exception e) {
-                    // Log error with field context for debugging
-                    System.err.printf("Warning: Failed to extract value from field '%s' in row %d: %s%n", 
-                                    fieldMeta.getFieldName(), row.getRowNum(), e.getMessage());
-                    cell.setCellValue(""); // Set empty on error
+                    System.err.printf("Warning: Failed to extract value from field '%s' in row %d: %s%n",
+                            fieldMeta.getFieldName(), row.getRowNum(), e.getMessage());
+                    cell.setCellValue("");
                 }
             }
         }
@@ -318,14 +319,10 @@ public class ExcelDatasetWriter {
         return null;
     }
     
-    private void setCellValue(Cell cell, Object value, FieldMeta fieldMeta, Workbook workbook) {
+    private void setCellValue(Cell cell, Object value, FieldMeta fieldMeta, CellStyle columnStyle) {
         if (value == null) {
             cell.setCellValue(fieldMeta.getDefaultValue());
-            return;
-        }
-        
-        // Set cell value based on type
-        if (value instanceof Number) {
+        } else if (value instanceof Number) {
             cell.setCellValue(((Number) value).doubleValue());
         } else if (value instanceof Boolean) {
             cell.setCellValue((Boolean) value);
@@ -338,85 +335,76 @@ public class ExcelDatasetWriter {
         } else {
             cell.setCellValue(value.toString());
         }
-        
-        // Apply column-specific formatting
-        applyCellFormatting(cell, fieldMeta, workbook);
+        cell.setCellStyle(columnStyle);
     }
-    
-    private void applyCellFormatting(Cell cell, FieldMeta fieldMeta, Workbook workbook) {
-        CellStyle cellStyle = workbook.createCellStyle();
-        
-        // Apply number format if specified
-        if (!fieldMeta.getNumberFormat().isEmpty()) {
-            DataFormat format = workbook.createDataFormat();
-            cellStyle.setDataFormat(format.getFormat(fieldMeta.getNumberFormat()));
-        }
-        
-        // Apply date format if specified
-        if (!fieldMeta.getDateFormat().equals("yyyy-MM-dd") && 
-            (cell.getCellType() == CellType.NUMERIC && DateUtil.isCellDateFormatted(cell))) {
-            DataFormat format = workbook.createDataFormat();
-            cellStyle.setDataFormat(format.getFormat(fieldMeta.getDateFormat()));
-        }
-        
-        // Apply visual formatting from FieldMeta
-        Font font = workbook.createFont();
-        
-        // Bold text
-        if (fieldMeta.isBold()) {
-            font.setBold(true);
-        }
-        
-        // Font color
-        if (!fieldMeta.getFontColor().isEmpty()) {
-            try {
-                short colorIndex = getColorIndex(fieldMeta.getFontColor());
-                font.setColor(colorIndex);
-            } catch (Exception e) {
-                // Ignore invalid colors
+
+    private Map<String, CellStyle> buildColumnStyles(List<FieldMeta> fields, Workbook workbook) {
+        DataFormat dataFormat = workbook.createDataFormat();
+        Map<String, CellStyle> styles = new HashMap<>();
+
+        for (FieldMeta fieldMeta : fields) {
+            CellStyle style = workbook.createCellStyle();
+
+            // Number format
+            if (!fieldMeta.getNumberFormat().isEmpty()) {
+                style.setDataFormat(dataFormat.getFormat(fieldMeta.getNumberFormat()));
             }
-        }
-        
-        cellStyle.setFont(font);
-        
-        // Background color
-        if (!fieldMeta.getBackgroundColor().isEmpty()) {
-            try {
-                short colorIndex = getColorIndex(fieldMeta.getBackgroundColor());
-                cellStyle.setFillForegroundColor(colorIndex);
-                cellStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-            } catch (Exception e) {
-                // Ignore invalid colors
-            }
-        }
-        
-        // Text wrapping
-        if (fieldMeta.isWrapText()) {
-            cellStyle.setWrapText(true);
-        }
-        
-        // Text alignment
-        switch (fieldMeta.getAlignment()) {
-            case LEFT:
-                cellStyle.setAlignment(HorizontalAlignment.LEFT);
-                break;
-            case CENTER:
-                cellStyle.setAlignment(HorizontalAlignment.CENTER);
-                break;
-            case RIGHT:
-                cellStyle.setAlignment(HorizontalAlignment.RIGHT);
-                break;
-            case AUTO:
-                // Use default alignment based on data type
-                if (Number.class.isAssignableFrom(fieldMeta.getFieldType())) {
-                    cellStyle.setAlignment(HorizontalAlignment.RIGHT);
-                } else {
-                    cellStyle.setAlignment(HorizontalAlignment.LEFT);
+
+            // Date format for date/datetime fields
+            Class<?> fieldType = fieldMeta.getFieldType();
+            if (fieldType == java.time.LocalDate.class || fieldType == java.time.LocalDateTime.class) {
+                String dateFormat = fieldMeta.getDateFormat();
+                if (fieldType == java.time.LocalDateTime.class && dateFormat.equals("yyyy-MM-dd")) {
+                    dateFormat = "yyyy-MM-dd HH:mm:ss";
                 }
-                break;
+                style.setDataFormat(dataFormat.getFormat(dateFormat));
+            }
+
+            // Font (only create when needed)
+            if (fieldMeta.isBold() || !fieldMeta.getFontColor().isEmpty()) {
+                Font font = workbook.createFont();
+                if (fieldMeta.isBold()) {
+                    font.setBold(true);
+                }
+                if (!fieldMeta.getFontColor().isEmpty()) {
+                    try {
+                        font.setColor(getColorIndex(fieldMeta.getFontColor()));
+                    } catch (Exception e) {
+                        // Ignore invalid colors
+                    }
+                }
+                style.setFont(font);
+            }
+
+            // Background color
+            if (!fieldMeta.getBackgroundColor().isEmpty()) {
+                try {
+                    style.setFillForegroundColor(getColorIndex(fieldMeta.getBackgroundColor()));
+                    style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+                } catch (Exception e) {
+                    // Ignore invalid colors
+                }
+            }
+
+            // Text wrapping
+            if (fieldMeta.isWrapText()) {
+                style.setWrapText(true);
+            }
+
+            // Alignment
+            switch (fieldMeta.getAlignment()) {
+                case LEFT   -> style.setAlignment(HorizontalAlignment.LEFT);
+                case CENTER -> style.setAlignment(HorizontalAlignment.CENTER);
+                case RIGHT  -> style.setAlignment(HorizontalAlignment.RIGHT);
+                case AUTO   -> style.setAlignment(
+                        Number.class.isAssignableFrom(fieldType)
+                                ? HorizontalAlignment.RIGHT
+                                : HorizontalAlignment.LEFT);
+            }
+
+            styles.put(fieldMeta.getFieldName(), style);
         }
-        
-        cell.setCellStyle(cellStyle);
+        return styles;
     }
     
     private void applyColumnFormatting(Sheet sheet, List<FieldMeta> fields, Workbook workbook) {

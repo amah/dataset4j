@@ -14,6 +14,7 @@ import java.lang.reflect.RecordComponent;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -169,7 +170,7 @@ public class ExcelDatasetReader {
         for (int i = headerRow.getFirstCellNum(); i < headerRow.getLastCellNum(); i++) {
             Cell cell = headerRow.getCell(i);
             if (cell != null) {
-                String value = getCellValueAsString(cell).trim();
+                String value = getCellValueAsString(cell, String.class).trim();
                 if (!value.isEmpty()) {
                     index.put(value, i);
                 }
@@ -182,7 +183,7 @@ public class ExcelDatasetReader {
         for (int i = row.getFirstCellNum(); i < row.getLastCellNum(); i++) {
             Cell cell = row.getCell(i);
             if (cell != null && cell.getCellType() != CellType.BLANK) {
-                String value = getCellValueAsString(cell);
+                String value = getCellValueAsString(cell, String.class);
                 if (!value.trim().isEmpty()) {
                     return false;
                 }
@@ -212,7 +213,7 @@ public class ExcelDatasetReader {
                     try {
                         values[i] = parseCellValue(cell, component.getType(), columnMeta);
                     } catch (Exception e) {
-                        String rawValue = cell != null ? getCellValueAsString(cell) : null;
+                        String rawValue = cell != null ? getCellValueAsString(cell, component.getType()) : null;
                         throw DatasetReadException.builder()
                             .row(rowIndex)
                             .column(colIndex)
@@ -287,7 +288,7 @@ public class ExcelDatasetReader {
             return getDefaultValue(targetType);
         }
 
-        String cellValue = getCellValueAsString(cell);
+        String cellValue = getCellValueAsString(cell, targetType);
         if (cellValue.trim().isEmpty()) {
             return getDefaultValue(targetType);
         }
@@ -306,12 +307,13 @@ public class ExcelDatasetReader {
         }
     }
 
-    private String getCellValueAsString(Cell cell) {
+    private String getCellValueAsString(Cell cell, Class<?> targetType) {
         return switch (cell.getCellType()) {
             case STRING -> cell.getStringCellValue();
             case NUMERIC -> {
                 if (DateUtil.isCellDateFormatted(cell)) {
-                    yield cell.getLocalDateTimeCellValue().toLocalDate().toString();
+                    LocalDateTime ldt = cell.getLocalDateTimeCellValue();
+                    yield targetType == LocalDateTime.class ? ldt.toString() : ldt.toLocalDate().toString();
                 } else {
                     double numValue = cell.getNumericCellValue();
                     if (numValue == (long) numValue) {
