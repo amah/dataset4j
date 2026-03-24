@@ -41,7 +41,8 @@ public final class FieldMeta {
     private final int width;
     private final boolean wrapText;
     private final DataColumn.Alignment alignment;
-    
+    private final DataColumn.WriteAs writeAs;
+
     private FieldMeta(Builder builder) {
         this.fieldName = builder.fieldName;
         this.columnName = builder.columnName;
@@ -62,6 +63,7 @@ public final class FieldMeta {
         this.width = builder.width;
         this.wrapText = builder.wrapText;
         this.alignment = builder.alignment;
+        this.writeAs = builder.writeAs;
     }
     
     // Getters
@@ -84,7 +86,8 @@ public final class FieldMeta {
     public int getWidth() { return width; }
     public boolean isWrapText() { return wrapText; }
     public DataColumn.Alignment getAlignment() { return alignment; }
-    
+    public DataColumn.WriteAs getWriteAs() { return writeAs; }
+
     /**
      * Get the effective column name, falling back to field name if not specified.
      */
@@ -161,7 +164,8 @@ public final class FieldMeta {
         private int width = -1;
         private boolean wrapText = false;
         private DataColumn.Alignment alignment = DataColumn.Alignment.AUTO;
-        
+        private DataColumn.WriteAs writeAs = DataColumn.WriteAs.AUTO;
+
         public Builder fieldName(String fieldName) {
             this.fieldName = fieldName != null ? fieldName : "";
             return this;
@@ -256,7 +260,12 @@ public final class FieldMeta {
             this.alignment = alignment != null ? alignment : DataColumn.Alignment.AUTO;
             return this;
         }
-        
+
+        public Builder writeAs(DataColumn.WriteAs writeAs) {
+            this.writeAs = writeAs != null ? writeAs : DataColumn.WriteAs.AUTO;
+            return this;
+        }
+
         public FieldMeta build() {
             return new FieldMeta(this);
         }

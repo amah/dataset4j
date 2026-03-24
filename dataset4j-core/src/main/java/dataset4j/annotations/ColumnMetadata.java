@@ -26,7 +26,8 @@ public final class ColumnMetadata {
     private final String dateFormat;
     private final String[] alternativeDateFormats;
     private final int maxLength;
-    
+    private final DataColumn.WriteAs writeAs;
+
     private ColumnMetadata(Builder builder) {
         this.recordComponent = builder.recordComponent;
         this.fieldName = builder.fieldName;
@@ -41,6 +42,7 @@ public final class ColumnMetadata {
         this.dateFormat = builder.dateFormat;
         this.alternativeDateFormats = builder.alternativeDateFormats;
         this.maxLength = builder.maxLength;
+        this.writeAs = builder.writeAs;
     }
     
     /** @return the record component this metadata describes */
@@ -69,6 +71,8 @@ public final class ColumnMetadata {
     public String[] getAlternativeDateFormats() { return alternativeDateFormats; }
     /** @return the maximum field length */
     public int getMaxLength() { return maxLength; }
+    /** @return the write-as mode */
+    public DataColumn.WriteAs getWriteAs() { return writeAs; }
     
     /**
      * Get the effective column name, falling back to field name if not specified.
@@ -130,7 +134,8 @@ public final class ColumnMetadata {
         private String dateFormat = "yyyy-MM-dd";
         private String[] alternativeDateFormats = {};
         private int maxLength = -1;
-        
+        private DataColumn.WriteAs writeAs = DataColumn.WriteAs.AUTO;
+
         /** Constructor. @param recordComponent the record component */
         public Builder(RecordComponent recordComponent) {
             this.recordComponent = recordComponent;
@@ -197,7 +202,13 @@ public final class ColumnMetadata {
             this.maxLength = maxLength;
             return this;
         }
-        
+
+        /** @param writeAs write-as mode @return this builder */
+        public Builder writeAs(DataColumn.WriteAs writeAs) {
+            this.writeAs = writeAs != null ? writeAs : DataColumn.WriteAs.AUTO;
+            return this;
+        }
+
         /** @return built ColumnMetadata instance */
         public ColumnMetadata build() {
             return new ColumnMetadata(this);

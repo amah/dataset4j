@@ -240,6 +240,7 @@ public final class PojoMetadata<T> {
                 .numberFormat(columnMeta.getNumberFormat())
                 .dateFormat(columnMeta.getDateFormat())
                 .width(columnMeta.getMaxLength())
+                .writeAs(columnMeta.getWriteAs())
                 .build();
     }
 }

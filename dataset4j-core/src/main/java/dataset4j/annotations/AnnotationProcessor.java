@@ -171,6 +171,9 @@ public final class AnnotationProcessor {
             if (dataColumn.width() != -1) {
                 builder.maxLength(dataColumn.width());
             }
+            if (dataColumn.writeAs() != DataColumn.WriteAs.AUTO) {
+                builder.writeAs(dataColumn.writeAs());
+            }
         }
         
         return builder.build();

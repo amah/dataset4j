@@ -390,7 +390,8 @@ public class ExcelDatasetWriter {
                 if (fieldType == java.time.LocalDateTime.class && dateFormat.equals("yyyy-MM-dd")) {
                     dateFormat = "yyyy-MM-dd HH:mm:ss";
                 }
-                style.setDataFormat(dataFormat.getFormat(dateFormat));
+                String excelFormat = JavaToExcelDateFormat.convert(dateFormat);
+                style.setDataFormat(dataFormat.getFormat(excelFormat));
             }
 
             // Font (only create when needed)

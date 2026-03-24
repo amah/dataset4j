@@ -157,7 +157,29 @@ public @interface DataColumn {
      * @return the text alignment option
      */
     Alignment alignment() default Alignment.AUTO;
-    
+
+    /**
+     * Controls how the value is physically written to the cell.
+     * <p>When set to {@code AUTO} (default), values are written using their native type
+     * (dates as Excel date serials, numbers as numeric cells, etc.).
+     * <p>When set to {@code STRING}, the value is formatted to a string before writing.
+     * For date fields this uses the {@link #dateFormat()} pattern; for numbers it uses
+     * the {@link #numberFormat()} pattern or {@code toString()}.
+     *
+     * @return the write-as mode
+     */
+    WriteAs writeAs() default WriteAs.AUTO;
+
+    /**
+     * Controls the physical cell type when writing values.
+     */
+    enum WriteAs {
+        /** Write using the native Java type (default behavior). */
+        AUTO,
+        /** Format the value as a string and write a text cell. */
+        STRING
+    }
+
     /**
      * Cell types for proper data handling.
      */
