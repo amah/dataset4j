@@ -6,7 +6,7 @@
 
     <groupId>io.github.amah</groupId>
     <artifactId>dataset4j-parent</artifactId>
-    <version>1.0.14</version>
+    <version>1.0.15</version>
     <packaging>pom</packaging>
 
     <name>dataset4j-parent</name>
