@@ -32,11 +32,15 @@ public class ExcelDatasetWriter {
     private String sheetName = "Sheet1";
     private boolean includeHeaders = true;
     private boolean autoSizeColumns = true;
-    
+
     // Field selection support
     private PojoMetadata<?> metadata;
     private FieldSelector<?> fieldSelector;
     private List<FieldMeta> selectedFields;
+
+    // Custom cell writers
+    private CellWriter globalCellWriter;
+    private final Map<String, CellWriter> fieldCellWriters = new HashMap<>();
     
     private ExcelDatasetWriter(String filePath) {
         this.filePath = filePath;
@@ -174,6 +178,41 @@ public class ExcelDatasetWriter {
     }
     
     /**
+     * Set a global custom cell writer applied to all cells.
+     * @param writer the cell writer
+     * @return this writer for chaining
+     */
+    public ExcelDatasetWriter cellWriter(CellWriter writer) {
+        this.globalCellWriter = writer;
+        return this;
+    }
+
+    /**
+     * Set a custom cell writer for a specific field.
+     * Per-field writers take priority over the global writer.
+     * @param fieldName the field name to target
+     * @param writer the cell writer
+     * @return this writer for chaining
+     */
+    public ExcelDatasetWriter cellWriter(String fieldName, CellWriter writer) {
+        this.fieldCellWriters.put(fieldName, writer);
+        return this;
+    }
+
+    /**
+     * Set the same custom cell writer for multiple fields.
+     * @param writer the cell writer
+     * @param fieldNames the field names to target
+     * @return this writer for chaining
+     */
+    public ExcelDatasetWriter cellWriter(CellWriter writer, String... fieldNames) {
+        for (String fieldName : fieldNames) {
+            this.fieldCellWriters.put(fieldName, writer);
+        }
+        return this;
+    }
+
+    /**
      * Use pre-built metadata for field selection.
      * @param <T> record type
      * @param metadata POJO metadata
@@ -263,7 +302,7 @@ public class ExcelDatasetWriter {
             // Write data rows
             for (T record : dataset.toList()) {
                 Row dataRow = sheet.createRow(rowIndex++);
-                writeDataRow(dataRow, record, fieldsToExport, columnStyles);
+                writeDataRow(dataRow, record, fieldsToExport, columnStyles, workbook);
             }
             
             // Apply column formatting
@@ -289,7 +328,8 @@ public class ExcelDatasetWriter {
         }
     }
     
-    private <T> void writeDataRow(Row row, T record, List<FieldMeta> fields, Map<String, CellStyle> columnStyles) {
+    private <T> void writeDataRow(Row row, T record, List<FieldMeta> fields,
+                                   Map<String, CellStyle> columnStyles, Workbook workbook) {
         RecordComponent[] components = record.getClass().getRecordComponents();
 
         for (int i = 0; i < fields.size(); i++) {
@@ -300,7 +340,12 @@ public class ExcelDatasetWriter {
             if (component != null) {
                 try {
                     Object value = component.getAccessor().invoke(record);
-                    setCellValue(cell, value, fieldMeta, columnStyles.get(fieldMeta.getFieldName()));
+                    CellWriter writer = resolveWriter(fieldMeta.getFieldName());
+                    CellWriterContext context = new CellWriterContext(
+                            cell, value, fieldMeta, workbook,
+                            columnStyles.get(fieldMeta.getFieldName()),
+                            DefaultCellWriter.INSTANCE);
+                    writer.write(context);
                 } catch (Exception e) {
                     System.err.printf("Warning: Failed to extract value from field '%s' in row %d: %s%n",
                             fieldMeta.getFieldName(), row.getRowNum(), e.getMessage());
@@ -308,6 +353,13 @@ public class ExcelDatasetWriter {
                 }
             }
         }
+    }
+
+    private CellWriter resolveWriter(String fieldName) {
+        CellWriter perField = fieldCellWriters.get(fieldName);
+        if (perField != null) return perField;
+        if (globalCellWriter != null) return globalCellWriter;
+        return DefaultCellWriter.INSTANCE;
     }
     
     private RecordComponent findComponent(RecordComponent[] components, String fieldName) {
@@ -319,25 +371,6 @@ public class ExcelDatasetWriter {
         return null;
     }
     
-    private void setCellValue(Cell cell, Object value, FieldMeta fieldMeta, CellStyle columnStyle) {
-        if (value == null) {
-            cell.setCellValue(fieldMeta.getDefaultValue());
-        } else if (value instanceof Number) {
-            cell.setCellValue(((Number) value).doubleValue());
-        } else if (value instanceof Boolean) {
-            cell.setCellValue((Boolean) value);
-        } else if (value instanceof java.util.Date) {
-            cell.setCellValue((java.util.Date) value);
-        } else if (value instanceof java.time.LocalDate) {
-            cell.setCellValue(java.sql.Date.valueOf((java.time.LocalDate) value));
-        } else if (value instanceof java.time.LocalDateTime) {
-            cell.setCellValue(java.sql.Timestamp.valueOf((java.time.LocalDateTime) value));
-        } else {
-            cell.setCellValue(value.toString());
-        }
-        cell.setCellStyle(columnStyle);
-    }
-
     private Map<String, CellStyle> buildColumnStyles(List<FieldMeta> fields, Workbook workbook) {
         DataFormat dataFormat = workbook.createDataFormat();
         Map<String, CellStyle> styles = new HashMap<>();
