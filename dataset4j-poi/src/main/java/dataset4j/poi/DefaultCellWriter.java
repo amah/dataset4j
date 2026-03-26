@@ -19,7 +19,7 @@ import java.time.temporal.TemporalAccessor;
  */
 public final class DefaultCellWriter implements CellWriter {
 
-    static final DefaultCellWriter INSTANCE = new DefaultCellWriter();
+    public static final DefaultCellWriter INSTANCE = new DefaultCellWriter();
 
     private DefaultCellWriter() {}
 
