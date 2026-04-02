@@ -3,12 +3,11 @@ package dataset4j.poi;
 import dataset4j.Dataset;
 import dataset4j.annotations.*;
 import dataset4j.annotations.DataColumn;
-import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.lang.reflect.RecordComponent;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
@@ -56,10 +55,11 @@ public class ExcelDatasetWriter {
      * @return new writer instance
      */
     public static ExcelDatasetWriter toFile(String filePath) {
-        // Validate file path to prevent directory traversal attacks
         Path path = Paths.get(filePath).normalize();
-        if (path.toString().contains("..")) {
-            throw new SecurityException("Path traversal detected in file path: " + filePath);
+        for (int i = 0; i < path.getNameCount(); i++) {
+            if ("..".equals(path.getName(i).toString())) {
+                throw new SecurityException("Path traversal detected in file path: " + filePath);
+            }
         }
         return new ExcelDatasetWriter(filePath);
     }
@@ -270,291 +270,43 @@ public class ExcelDatasetWriter {
      * @throws IOException if file cannot be written
      */
     public <T> void write(Dataset<T> dataset) throws IOException {
-        // Handle empty dataset - just create an empty Excel file
-        if (dataset.isEmpty()) {
-            try (Workbook workbook = new XSSFWorkbook();
-                 FileOutputStream fos = new FileOutputStream(filePath)) {
-                workbook.createSheet(sheetName);
-                workbook.write(fos);
+        if (!dataset.isEmpty()) {
+            Class<?> recordClass = dataset.toList().get(0).getClass();
+            if (!recordClass.isRecord()) {
+                throw new IllegalArgumentException("Dataset must contain record types");
             }
-            return;
+            if (metadata == null) {
+                @SuppressWarnings("unchecked")
+                Class<Object> typedClass = (Class<Object>) recordClass;
+                metadata = MetadataCache.getMetadata(typedClass);
+            }
         }
-        
-        Class<?> recordClass = dataset.toList().get(0).getClass();
-        if (!recordClass.isRecord()) {
-            throw new IllegalArgumentException("Dataset must contain record types");
-        }
-        
-        // Get or create metadata
-        if (metadata == null) {
-            @SuppressWarnings("unchecked")
-            Class<Object> typedClass = (Class<Object>) recordClass;
-            metadata = MetadataCache.getMetadata(typedClass);
-        }
-        
-        // Determine which fields to export
-        List<FieldMeta> fieldsToExport;
-        if (fieldSelector != null) {
-            fieldsToExport = fieldSelector.select();
-        } else if (selectedFields != null) {
-            fieldsToExport = selectedFields;
-        } else {
-            fieldsToExport = metadata.getExportableFields();
-        }
-        
-        if (fieldsToExport.isEmpty()) {
-            throw new IllegalArgumentException("No fields selected for export");
-        }
-        
-        // Convert to ColumnMetadata for backward compatibility
-        List<ColumnMetadata> columns = fieldsToExport.stream()
-                .map(FieldMeta::toColumnMetadata)
-                .collect(java.util.stream.Collectors.toList());
-        
+
+        List<FieldMeta> fieldsToExport = resolveFields();
+
         try (Workbook workbook = new XSSFWorkbook();
              FileOutputStream fos = new FileOutputStream(filePath)) {
-            
-            Sheet sheet = workbook.createSheet(sheetName);
-            CellStyle headerStyle = createHeaderStyle(workbook);
-            Map<String, CellStyle> columnStyles = buildColumnStyles(fieldsToExport, workbook);
 
-            int rowIndex = 0;
-
-            // Write headers
-            if (includeHeaders) {
-                Row headerRow = sheet.createRow(rowIndex++);
-                writeHeaders(headerRow, fieldsToExport, headerStyle);
-            }
-
-            // Write data rows
-            for (T record : dataset.toList()) {
-                Row dataRow = sheet.createRow(rowIndex++);
-                writeDataRow(dataRow, record, fieldsToExport, columnStyles, workbook);
-            }
-            
-            // Apply column formatting
-            applyColumnFormatting(sheet, fieldsToExport, workbook);
-            
-            // Auto-size columns if requested
-            if (autoSizeColumns) {
-                for (int i = 0; i < fieldsToExport.size(); i++) {
-                    sheet.autoSizeColumn(i);
+            if (dataset.isEmpty()) {
+                workbook.createSheet(sheetName);
+            } else {
+                if (fieldsToExport.isEmpty()) {
+                    throw new IllegalArgumentException("No fields selected for export");
                 }
+                SheetRenderConfig config = new SheetRenderConfig(
+                        fieldsToExport, includeHeaders, autoSizeColumns,
+                        globalCellWriter, fieldCellWriters, typeDefaults, fieldDefaults);
+                ExcelSheetRenderer.renderSheet(workbook, sheetName, dataset, config);
             }
-            
+
             workbook.write(fos);
         }
     }
-    
-    private void writeHeaders(Row headerRow, List<FieldMeta> fields, CellStyle headerStyle) {
-        for (int i = 0; i < fields.size(); i++) {
-            FieldMeta field = fields.get(i);
-            Cell cell = headerRow.createCell(i);
-            cell.setCellValue(field.getEffectiveColumnName());
-            cell.setCellStyle(headerStyle);
-        }
-    }
-    
-    private <T> void writeDataRow(Row row, T record, List<FieldMeta> fields,
-                                   Map<String, CellStyle> columnStyles, Workbook workbook) {
-        RecordComponent[] components = record.getClass().getRecordComponents();
 
-        for (int i = 0; i < fields.size(); i++) {
-            FieldMeta fieldMeta = fields.get(i);
-            Cell cell = row.createCell(i);
-
-            RecordComponent component = findComponent(components, fieldMeta.getFieldName());
-            if (component != null) {
-                try {
-                    Object value = component.getAccessor().invoke(record);
-                    if (value == null) {
-                        value = resolveWriteDefault(fieldMeta);
-                    }
-                    CellWriter writer = resolveWriter(fieldMeta.getFieldName());
-                    CellWriterContext context = new CellWriterContext(
-                            cell, value, fieldMeta, workbook,
-                            columnStyles.get(fieldMeta.getFieldName()),
-                            DefaultCellWriter.INSTANCE);
-                    writer.write(context);
-                } catch (Exception e) {
-                    System.err.printf("Warning: Failed to extract value from field '%s' in row %d: %s%n",
-                            fieldMeta.getFieldName(), row.getRowNum(), e.getMessage());
-                    cell.setCellValue("");
-                }
-            }
-        }
-    }
-
-    /**
-     * Resolve default value for a null field during writing.
-     * Priority: per-field override > type-based override > @DataColumn(defaultValue) annotation > null.
-     */
-    private Object resolveWriteDefault(FieldMeta fieldMeta) {
-        // 1. Per-field override
-        if (fieldDefaults.containsKey(fieldMeta.getFieldName())) {
-            return fieldDefaults.get(fieldMeta.getFieldName());
-        }
-
-        // 2. Type-based override
-        if (typeDefaults.containsKey(fieldMeta.getFieldType())) {
-            return typeDefaults.get(fieldMeta.getFieldType());
-        }
-
-        // 3. Fall through to null — DefaultCellWriter handles @DataColumn(defaultValue)
-        return null;
-    }
-
-    private CellWriter resolveWriter(String fieldName) {
-        CellWriter perField = fieldCellWriters.get(fieldName);
-        if (perField != null) return perField;
-        if (globalCellWriter != null) return globalCellWriter;
-        return DefaultCellWriter.INSTANCE;
-    }
-    
-    private RecordComponent findComponent(RecordComponent[] components, String fieldName) {
-        for (RecordComponent component : components) {
-            if (component.getName().equals(fieldName)) {
-                return component;
-            }
-        }
-        return null;
-    }
-    
-    private Map<String, CellStyle> buildColumnStyles(List<FieldMeta> fields, Workbook workbook) {
-        DataFormat dataFormat = workbook.createDataFormat();
-        Map<String, CellStyle> styles = new HashMap<>();
-
-        for (FieldMeta fieldMeta : fields) {
-            CellStyle style = workbook.createCellStyle();
-
-            // Number format
-            if (!fieldMeta.getNumberFormat().isEmpty()) {
-                style.setDataFormat(dataFormat.getFormat(fieldMeta.getNumberFormat()));
-            }
-
-            // Date format for date/datetime fields
-            Class<?> fieldType = fieldMeta.getFieldType();
-            if (fieldType == java.time.LocalDate.class || fieldType == java.time.LocalDateTime.class) {
-                String dateFormat = fieldMeta.getDateFormat();
-                if (fieldType == java.time.LocalDateTime.class && dateFormat.equals("yyyy-MM-dd")) {
-                    dateFormat = "yyyy-MM-dd HH:mm:ss";
-                }
-                String excelFormat = JavaToExcelDateFormat.convert(dateFormat);
-                style.setDataFormat(dataFormat.getFormat(excelFormat));
-            }
-
-            // Font (only create when needed)
-            if (fieldMeta.isBold() || !fieldMeta.getFontColor().isEmpty()) {
-                Font font = workbook.createFont();
-                if (fieldMeta.isBold()) {
-                    font.setBold(true);
-                }
-                if (!fieldMeta.getFontColor().isEmpty()) {
-                    try {
-                        font.setColor(getColorIndex(fieldMeta.getFontColor()));
-                    } catch (Exception e) {
-                        // Ignore invalid colors
-                    }
-                }
-                style.setFont(font);
-            }
-
-            // Background color
-            if (!fieldMeta.getBackgroundColor().isEmpty()) {
-                try {
-                    style.setFillForegroundColor(getColorIndex(fieldMeta.getBackgroundColor()));
-                    style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-                } catch (Exception e) {
-                    // Ignore invalid colors
-                }
-            }
-
-            // Text wrapping
-            if (fieldMeta.isWrapText()) {
-                style.setWrapText(true);
-            }
-
-            // Alignment
-            switch (fieldMeta.getAlignment()) {
-                case LEFT   -> style.setAlignment(HorizontalAlignment.LEFT);
-                case CENTER -> style.setAlignment(HorizontalAlignment.CENTER);
-                case RIGHT  -> style.setAlignment(HorizontalAlignment.RIGHT);
-                case AUTO   -> style.setAlignment(
-                        Number.class.isAssignableFrom(fieldType)
-                                ? HorizontalAlignment.RIGHT
-                                : HorizontalAlignment.LEFT);
-            }
-
-            styles.put(fieldMeta.getFieldName(), style);
-        }
-        return styles;
-    }
-    
-    private void applyColumnFormatting(Sheet sheet, List<FieldMeta> fields, Workbook workbook) {
-        int freezeColumn = -1;
-        
-        for (int i = 0; i < fields.size(); i++) {
-            FieldMeta field = fields.get(i);
-            
-            // Set column width if specified
-            if (field.getWidth() > 0) {
-                sheet.setColumnWidth(i, field.getWidth() * 256); // POI uses 1/256th units
-            }
-            
-            // Track frozen columns
-            if (field.isFrozen() && freezeColumn < i) {
-                freezeColumn = i;
-            }
-        }
-        
-        // Apply freeze panes for rightmost frozen column
-        if (freezeColumn >= 0) {
-            sheet.createFreezePane(freezeColumn + 1, includeHeaders ? 1 : 0);
-        }
-    }
-    
-    private CellStyle createHeaderStyle(Workbook workbook) {
-        CellStyle style = workbook.createCellStyle();
-        
-        // Bold font
-        Font font = workbook.createFont();
-        font.setBold(true);
-        style.setFont(font);
-        
-        // Background color
-        style.setFillForegroundColor(IndexedColors.GREY_25_PERCENT.getIndex());
-        style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-        
-        // Borders
-        style.setBorderTop(BorderStyle.THIN);
-        style.setBorderBottom(BorderStyle.THIN);
-        style.setBorderLeft(BorderStyle.THIN);
-        style.setBorderRight(BorderStyle.THIN);
-        
-        return style;
-    }
-    
-    /**
-     * Convert color name or hex to POI color index.
-     * This is a simplified implementation - a full implementation would support more colors.
-     */
-    private short getColorIndex(String color) {
-        if (color.startsWith("#")) {
-            // Hex colors - simplified mapping to closest indexed color
-            return IndexedColors.AUTOMATIC.getIndex();
-        }
-        
-        // Named colors
-        switch (color.toLowerCase()) {
-            case "red": return IndexedColors.RED.getIndex();
-            case "blue": return IndexedColors.BLUE.getIndex();
-            case "green": return IndexedColors.GREEN.getIndex();
-            case "yellow": return IndexedColors.YELLOW.getIndex();
-            case "orange": return IndexedColors.ORANGE.getIndex();
-            case "gray": case "grey": return IndexedColors.GREY_25_PERCENT.getIndex();
-            case "black": return IndexedColors.BLACK.getIndex();
-            case "white": return IndexedColors.WHITE.getIndex();
-            default: return IndexedColors.AUTOMATIC.getIndex();
-        }
+    private List<FieldMeta> resolveFields() {
+        if (fieldSelector != null) return fieldSelector.select();
+        if (selectedFields != null) return selectedFields;
+        if (metadata != null) return metadata.getExportableFields();
+        return java.util.Collections.emptyList();
     }
 }

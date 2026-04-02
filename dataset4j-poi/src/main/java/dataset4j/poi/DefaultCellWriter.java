@@ -74,9 +74,14 @@ public final class DefaultCellWriter implements CellWriter {
             return new java.text.SimpleDateFormat(meta.getDateFormat()).format(date);
         }
 
-        // Numbers: use numberFormat if present
+        // Numbers: use numberFormat if present.
+        // DecimalFormatSymbols.getInstance(Locale.US) ensures the pattern characters
+        // (, . # 0) are interpreted as US conventions regardless of the system locale.
         if (value instanceof Number number && !meta.getNumberFormat().isEmpty()) {
-            return new java.text.DecimalFormat(meta.getNumberFormat()).format(number);
+            return new java.text.DecimalFormat(
+                    meta.getNumberFormat(),
+                    java.text.DecimalFormatSymbols.getInstance(java.util.Locale.US)
+            ).format(number);
         }
 
         return value.toString();

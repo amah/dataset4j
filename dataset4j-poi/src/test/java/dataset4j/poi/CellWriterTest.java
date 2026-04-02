@@ -12,6 +12,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -233,6 +234,34 @@ class CellWriterTest {
             Row row = sheet.getRow(1);
             assertEquals("Skip", row.getCell(0).getStringCellValue());
             assertEquals(CellType.BLANK, row.getCell(1).getCellType());
+        }
+    }
+
+    public record FormattedNumber(
+        @DataColumn(name = "Amount", order = 1,
+                    numberFormat = "#,##0.00",
+                    writeAs = DataColumn.WriteAs.STRING)
+        double amount
+    ) {}
+
+    @Test
+    void defaultCellWriter_usesUSLocaleForNumberFormat_regardlessOfSystemLocale() throws IOException {
+        Locale saved = Locale.getDefault();
+        Locale.setDefault(Locale.GERMANY);
+        try {
+            Path file = tempDir.resolve("locale.xlsx");
+            Dataset<FormattedNumber> data = Dataset.of(new FormattedNumber(1234.56));
+
+            ExcelDatasetWriter.toFile(file.toString()).write(data);
+
+            try (Workbook wb = new XSSFWorkbook(new FileInputStream(file.toFile()))) {
+                Sheet sheet = wb.getSheetAt(0);
+                Row row = sheet.getRow(1);
+                // Locale.GERMANY would produce "1.234,56"; Locale.US produces "1,234.56"
+                assertEquals("1,234.56", row.getCell(0).getStringCellValue());
+            }
+        } finally {
+            Locale.setDefault(saved);
         }
     }
 }
