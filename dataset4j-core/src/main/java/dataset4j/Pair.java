@@ -28,6 +28,11 @@ import java.util.function.Function;
  */
 public record Pair<L, R>(L left, R right) {
 
+    /** Factory method for creating a Pair. */
+    public static <L, R> Pair<L, R> of(L left, R right) {
+        return new Pair<>(left, right);
+    }
+
     /** Map both sides into a new value. */
     public <V> V map(BiFunction<L, R, V> mapper) {
         return mapper.apply(left, right);
