@@ -28,9 +28,12 @@ import java.util.List;
  */
 public class ParquetDatasetReader {
     
+    private static final long DEFAULT_MAX_FILE_SIZE = 1L * 1024 * 1024 * 1024; // 1GB
+
     private final Path filePath;
     private ParquetCompressionCodec compressionCodec = ParquetCompressionCodec.UNCOMPRESSED;
-    
+    private long maxFileSize = DEFAULT_MAX_FILE_SIZE;
+
     private ParquetDatasetReader(String filePath) {
         this.filePath = Paths.get(filePath);
     }
@@ -47,16 +50,6 @@ public class ParquetDatasetReader {
             throw new SecurityException("Path traversal detected in file path: " + filePath);
         }
         
-        // Check file size to prevent resource exhaustion attacks
-        try {
-            long fileSize = Files.size(path);
-            if (fileSize > 100 * 1024 * 1024) { // 100MB limit
-                throw new IOException("File too large: " + fileSize + " bytes (max 100MB)");
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to check file size: " + e.getMessage(), e);
-        }
-        
         return new ParquetDatasetReader(filePath);
     }
     
@@ -69,6 +62,19 @@ public class ParquetDatasetReader {
         this.compressionCodec = codec;
         return this;
     }
+
+    /**
+     * Set maximum allowed file size in bytes (default: 1GB).
+     * @param maxBytes maximum file size in bytes
+     * @return this reader for chaining
+     */
+    public ParquetDatasetReader maxFileSize(long maxBytes) {
+        if (maxBytes <= 0) {
+            throw new IllegalArgumentException("maxFileSize must be positive");
+        }
+        this.maxFileSize = maxBytes;
+        return this;
+    }
     
     /**
      * Read Parquet data into Dataset of specified record type.
@@ -78,6 +84,12 @@ public class ParquetDatasetReader {
      * @throws IOException if file cannot be read
      */
     public <T> Dataset<T> readAs(Class<T> recordClass) throws IOException {
+        long fileSize = Files.size(filePath);
+        if (fileSize > maxFileSize) {
+            throw new IOException("File too large: " + fileSize + " bytes (max " + maxFileSize + " bytes). "
+                    + "Use maxFileSize() to increase the limit.");
+        }
+
         if (!recordClass.isRecord()) {
             throw new IllegalArgumentException("Class must be a record: " + recordClass.getName());
         }
