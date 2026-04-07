@@ -1,8 +1,10 @@
 package dataset4j.parquet;
 
 import dataset4j.Dataset;
+import dataset4j.DatasetReadException;
 import dataset4j.annotations.AnnotationProcessor;
 import dataset4j.annotations.ColumnMetadata;
+import dataset4j.annotations.FormatProvider;
 import org.apache.parquet.format.*;
 
 import java.io.ByteArrayInputStream;
@@ -20,9 +22,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -48,6 +55,11 @@ public class ParquetDatasetReader {
     private final Path filePath;
     private long maxFileSize = DEFAULT_MAX_FILE_SIZE;
 
+    // Configurable default values applied when a column is missing from the file or
+    // when its decoded value is null. Per-field overrides take priority over per-type.
+    private final Map<Class<?>, Object> typeDefaults = new LinkedHashMap<>();
+    private final Map<String, Object> fieldDefaults = new LinkedHashMap<>();
+
     private ParquetDatasetReader(String filePath) {
         this.filePath = Paths.get(filePath);
     }
@@ -64,6 +76,24 @@ public class ParquetDatasetReader {
     public ParquetDatasetReader maxFileSize(long maxBytes) {
         if (maxBytes <= 0) throw new IllegalArgumentException("maxFileSize must be positive");
         this.maxFileSize = maxBytes;
+        return this;
+    }
+
+    /**
+     * Set a default value for all fields of the given type when the column is missing from
+     * the file or its decoded value is null. Mirrors {@code ExcelDatasetReader.defaultValue}.
+     */
+    public ParquetDatasetReader defaultValue(Class<?> type, Object value) {
+        this.typeDefaults.put(type, value);
+        return this;
+    }
+
+    /**
+     * Set a default value for a specific record field. Per-field defaults take priority over
+     * per-type defaults and over {@code @DataColumn(defaultValue=...)}.
+     */
+    public ParquetDatasetReader defaultValue(String fieldName, Object value) {
+        this.fieldDefaults.put(fieldName, value);
         return this;
     }
 
@@ -111,7 +141,10 @@ public class ParquetDatasetReader {
             // Build a map: Parquet column name → record component index. Honors @DataColumn(name=...)
             // via ColumnMetadata.getEffectiveColumnName(); falls back to the bare component name so
             // records without annotations still resolve when names match exactly.
+            // Also build componentIdx → ColumnMetadata so the conversion step can honor dateFormat
+            // and defaultValue from @DataColumn.
             Map<String, Integer> parquetColToComponentIdx = new HashMap<>();
+            ColumnMetadata[] componentMetas = new ColumnMetadata[components.length];
             try {
                 List<ColumnMetadata> colMetas = AnnotationProcessor.extractColumns(recordClass);
                 for (ColumnMetadata cm : colMetas) {
@@ -121,6 +154,7 @@ public class ParquetDatasetReader {
                             // Also register the bare field name as a fallback for files whose
                             // schema uses the field name rather than the annotated column name.
                             parquetColToComponentIdx.putIfAbsent(cm.getFieldName(), i);
+                            componentMetas[i] = cm;
                             break;
                         }
                     }
@@ -141,11 +175,13 @@ public class ParquetDatasetReader {
             }
 
             List<T> result = new ArrayList<>();
+            int rowOffset = 0;
             for (RowGroup rg : fmd.getRow_groups()) {
                 int numRows = (int) rg.getNum_rows();
                 // values[componentIdx] = decoded column array for that record component (may be null
                 // if the file has no matching column).
                 Object[][] values = new Object[components.length][];
+                String[] columnPaths = new String[components.length];
                 for (ColumnChunk cc : rg.getColumns()) {
                     ColumnMetaData cmd = cc.getMeta_data();
                     String colName = cmd.getPath_in_schema().get(0);
@@ -153,20 +189,41 @@ public class ParquetDatasetReader {
                     if (compIdx == null) continue; // file column not present in record — skip
                     SchemaElement se = schemaByName.get(colName);
                     values[compIdx] = readColumnChunk(ch, cmd, se, numRows);
+                    columnPaths[compIdx] = colName;
                 }
 
                 for (int row = 0; row < numRows; row++) {
                     Object[] args = new Object[components.length];
                     for (int i = 0; i < components.length; i++) {
                         Object raw = values[i] == null ? null : values[i][row];
-                        args[i] = convertToTarget(raw, components[i].getType());
+                        Class<?> targetType = components[i].getType();
+                        ColumnMetadata cm = componentMetas[i];
+                        try {
+                            args[i] = convertToTarget(raw, targetType, cm);
+                        } catch (RuntimeException e) {
+                            throw DatasetReadException.builder()
+                                    .row(rowOffset + row)
+                                    .recordClass(recordClass)
+                                    .fieldName(components[i].getName())
+                                    .fieldTypeName(targetType.getSimpleName())
+                                    .rawValue(raw == null ? null : raw.toString())
+                                    .parseMessage(e.getMessage())
+                                    .cause(e)
+                                    .build();
+                        }
                     }
                     try {
                         result.add(ctor.newInstance(args));
                     } catch (ReflectiveOperationException e) {
-                        throw new IOException("Failed to instantiate record " + recordClass.getName(), e);
+                        throw DatasetReadException.builder()
+                                .row(rowOffset + row)
+                                .recordClass(recordClass)
+                                .parseMessage("Failed to instantiate record: " + e.getMessage())
+                                .cause(e)
+                                .build();
                     }
                 }
+                rowOffset += numRows;
             }
             return Dataset.of(result);
         }
@@ -393,26 +450,38 @@ public class ParquetDatasetReader {
 
     // ---------- Type conversion to record component types ----------
 
-    private Object convertToTarget(Object raw, Class<?> target) {
-        if (raw == null) return null;
+    /**
+     * Convert a decoded raw value (as produced by {@link #decodePlainValues}) to the record
+     * component's declared type. Null values trigger the default-value chain
+     * ({@link #fieldDefaults} → {@link #typeDefaults} → {@code @DataColumn(defaultValue)} →
+     * built-in default). String values are parsed via {@link FormatProvider#parseValue} which
+     * honors {@code @DataColumn(dateFormat=...)} and supports the full Excel-reader type set.
+     */
+    private Object convertToTarget(Object raw, Class<?> target, ColumnMetadata cm) {
+        if (raw == null) return resolveDefault(target, cm);
         if (target.isInstance(raw)) return raw;
 
-        // Boxed/primitive numeric and boolean: target.isInstance handles boxed; primitive types
-        // are auto-boxed by reflection. So Integer/Long/etc. are already covered above.
+        // String → typed: route through FormatProvider so dateFormat / alternativeDateFormats /
+        // numeric formats from @DataColumn are honored. This is the path for BYTE_ARRAY+STRING
+        // columns being read into LocalDateTime / ZonedDateTime / OffsetDateTime / LocalDate
+        // (with a custom dateFormat) / BigDecimal / Date / etc.
+        if (raw instanceof String s && target != String.class) {
+            if (cm != null) {
+                Object parsed = FormatProvider.parseValue(s, cm);
+                if (target.isInstance(parsed)) return parsed;
+                // FormatProvider returned a String fallback or wrong type — fall through to manual.
+            }
+            return parseStringManually(s, target);
+        }
 
-        if (target == BigDecimal.class) {
-            if (raw instanceof BigDecimal bd) return bd;
-            if (raw instanceof String s) return new BigDecimal(s);
+        // Direct conversions for non-String raws
+        if (target == String.class) return raw.toString();
+        if (target == BigDecimal.class && raw instanceof Number n) {
+            return new BigDecimal(n.toString());
         }
-        if (target == LocalDate.class) {
-            if (raw instanceof LocalDate d) return d;
-            if (raw instanceof Integer i) return LocalDate.ofEpochDay(i);
-            if (raw instanceof String s) return LocalDate.parse(s);
+        if (target == LocalDate.class && raw instanceof Integer i) {
+            return LocalDate.ofEpochDay(i);
         }
-        if (target == String.class) {
-            return raw.toString();
-        }
-        // Numeric widening fallbacks
         if (raw instanceof Number n) {
             if (target == Integer.class || target == int.class) return n.intValue();
             if (target == Long.class || target == long.class) return n.longValue();
@@ -421,6 +490,63 @@ public class ParquetDatasetReader {
         }
         throw new IllegalStateException("Cannot convert " + raw.getClass().getName()
                 + " to " + target.getName());
+    }
+
+    /** Manual string parsing for the case where we have no ColumnMetadata to drive FormatProvider. */
+    private static Object parseStringManually(String s, Class<?> target) {
+        if (target == String.class) return s;
+        if (target == Integer.class || target == int.class) return Integer.parseInt(s);
+        if (target == Long.class || target == long.class) return Long.parseLong(s);
+        if (target == Double.class || target == double.class) return Double.parseDouble(s);
+        if (target == Float.class || target == float.class) return Float.parseFloat(s);
+        if (target == Boolean.class || target == boolean.class) return Boolean.parseBoolean(s);
+        if (target == BigDecimal.class) return new BigDecimal(s);
+        if (target == LocalDate.class) return LocalDate.parse(s);
+        if (target == LocalDateTime.class) return LocalDateTime.parse(s);
+        if (target == ZonedDateTime.class) return ZonedDateTime.parse(s);
+        if (target == OffsetDateTime.class) return OffsetDateTime.parse(s);
+        if (target == Date.class) {
+            return Date.from(LocalDateTime.parse(s).atZone(java.time.ZoneId.systemDefault()).toInstant());
+        }
+        throw new IllegalStateException("Cannot parse string '" + s + "' to " + target.getName());
+    }
+
+    /**
+     * Resolve the value used when a column is missing from the file or its decoded value is null.
+     * Priority chain mirrors {@link dataset4j.poi.ExcelDatasetReader}:
+     * <ol>
+     *   <li>Per-field override via {@link #defaultValue(String, Object)}</li>
+     *   <li>Per-type override via {@link #defaultValue(Class, Object)}</li>
+     *   <li>{@code @DataColumn(defaultValue="...")} annotation, parsed via FormatProvider</li>
+     *   <li>Built-in default (zero/false/null)</li>
+     * </ol>
+     */
+    private Object resolveDefault(Class<?> targetType, ColumnMetadata cm) {
+        if (cm != null && fieldDefaults.containsKey(cm.getFieldName())) {
+            return fieldDefaults.get(cm.getFieldName());
+        }
+        if (typeDefaults.containsKey(targetType)) {
+            return typeDefaults.get(targetType);
+        }
+        if (cm != null && cm.getDefaultValue() != null && !cm.getDefaultValue().isEmpty()) {
+            try {
+                return FormatProvider.parseValue(cm.getDefaultValue(), cm);
+            } catch (RuntimeException ignored) {
+                return parseStringManually(cm.getDefaultValue(), targetType);
+            }
+        }
+        return builtInDefault(targetType);
+    }
+
+    private static Object builtInDefault(Class<?> type) {
+        // Only return non-null for true primitive types (records can't accept null primitives).
+        // Wrapper types and BigDecimal return null so existing null-round-trip behavior is preserved.
+        if (type == int.class) return 0;
+        if (type == long.class) return 0L;
+        if (type == double.class) return 0.0;
+        if (type == float.class) return 0f;
+        if (type == boolean.class) return false;
+        return null;
     }
 
     // ---------- Schema translation ----------

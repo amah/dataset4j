@@ -18,6 +18,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -417,6 +420,12 @@ public class ParquetDatasetWriter {
                 lc.physicalType = Type.INT32;
                 lc.logicalType = LogicalType.DATE(new DateType());
                 lc.convertedType = ConvertedType.DATE;
+            } else if (jt == LocalDateTime.class || jt == ZonedDateTime.class || jt == OffsetDateTime.class) {
+                // Stored as ISO-8601 string (BYTE_ARRAY + STRING). Reader uses FormatProvider.parseValue
+                // which honors @DataColumn(dateFormat="...") and falls back to ISO parsing.
+                lc.physicalType = Type.BYTE_ARRAY;
+                lc.logicalType = LogicalType.STRING(new StringType());
+                lc.convertedType = ConvertedType.UTF8;
             } else if (jt == BigDecimal.class) {
                 lc.physicalType = Type.BYTE_ARRAY;
                 if (bigDecimalAsLogicalDecimal) {

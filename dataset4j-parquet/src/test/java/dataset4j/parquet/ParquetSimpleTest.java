@@ -326,6 +326,92 @@ class ParquetSimpleTest {
         assertTrue(parquetFile.toFile().length() > 0);
     }
 
+    public record EventLog(
+        @DataColumn(name = "id", required = true) Integer id,
+        @DataColumn(name = "label") String label,
+        @DataColumn(name = "occurred_at") java.time.LocalDateTime occurredAt
+    ) {}
+
+    @Test
+    void shouldRoundTripLocalDateTime() throws IOException {
+        Path parquetFile = tempDir.resolve("local_datetime.parquet");
+        EventLog e1 = new EventLog(1, "boot", java.time.LocalDateTime.of(2024, 1, 15, 9, 30, 45));
+        EventLog e2 = new EventLog(2, "shutdown", java.time.LocalDateTime.of(2024, 1, 15, 17, 0, 0));
+        EventLog e3 = new EventLog(3, "restart", null);
+
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.SNAPPY)
+                .write(Dataset.of(e1, e2, e3));
+
+        Dataset<EventLog> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(EventLog.class);
+        assertEquals(3, readBack.size());
+        assertEquals(e1, readBack.toList().get(0));
+        assertEquals(e2, readBack.toList().get(1));
+        assertEquals(e3, readBack.toList().get(2));
+    }
+
+    public record FrenchEvent(
+        @DataColumn(name = "id") Integer id,
+        @DataColumn(name = "event_date", dateFormat = "dd/MM/yyyy") LocalDate eventDate
+    ) {}
+
+    @Test
+    void shouldHonorCustomDateFormatWhenReadingStringColumn() throws IOException {
+        // Write an Event whose date is stored as a BYTE_ARRAY string in the French format.
+        // We use a separate write-side record where the field is a String, then read it back
+        // into FrenchEvent which declares LocalDate with @DataColumn(dateFormat="dd/MM/yyyy").
+        Path parquetFile = tempDir.resolve("french_event.parquet");
+
+        record FrenchEventWrite(
+            @DataColumn(name = "id") Integer id,
+            @DataColumn(name = "event_date") String eventDate
+        ) {}
+
+        Dataset<FrenchEventWrite> in = Dataset.of(
+            new FrenchEventWrite(1, "31/12/2024"),
+            new FrenchEventWrite(2, "01/06/2025")
+        );
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.SNAPPY)
+                .write(in);
+
+        Dataset<FrenchEvent> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(FrenchEvent.class);
+        assertEquals(2, readBack.size());
+        assertEquals(LocalDate.of(2024, 12, 31), readBack.toList().get(0).eventDate());
+        assertEquals(LocalDate.of(2025, 6, 1), readBack.toList().get(1).eventDate());
+    }
+
+    public record OptionalRecord(
+        @DataColumn(name = "id") Integer id,
+        @DataColumn(name = "name", defaultValue = "anonymous") String name,
+        @DataColumn(name = "score") Integer score
+    ) {}
+
+    @Test
+    void shouldApplyDefaultValueChain() throws IOException {
+        // Write a row with name=null and score=null. Reader should:
+        //  - use the @DataColumn(defaultValue="anonymous") for name
+        //  - use the per-field default for score (set via builder)
+        Path parquetFile = tempDir.resolve("defaults.parquet");
+        Dataset<OptionalRecord> in = Dataset.of(new OptionalRecord(1, null, null));
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.SNAPPY)
+                .write(in);
+
+        Dataset<OptionalRecord> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .defaultValue("score", 42)
+                .readAs(OptionalRecord.class);
+        OptionalRecord r = readBack.first().orElseThrow();
+        assertEquals(1, r.id());
+        assertEquals("anonymous", r.name());
+        assertEquals(42, r.score());
+    }
+
     @Test
     void shouldRoundTripBigDecimalAsLogicalDecimal() throws IOException {
         Path parquetFile = tempDir.resolve("decimal_logical.parquet");
