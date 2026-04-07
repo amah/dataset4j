@@ -100,45 +100,82 @@ final class ParquetIo {
     }
 
     /**
-     * Decode definition levels from a DATA_PAGE_V1 levels block (length-prefixed RLE/bit-packed hybrid).
-     * Advances the buffer past the levels block. Bit-width is 1.
+     * Decode definition levels from a DATA_PAGE_V1 levels block (length-prefixed RLE/bit-packed
+     * hybrid). Advances the buffer past the levels block.
      *
-     * @param buf  buffer positioned at the 4-byte length prefix (LE)
+     * @param buf       buffer positioned at the 4-byte LE length prefix
+     * @param bitWidth  level bit-width (1 for max_def_level=1)
      * @param numValues total number of levels expected (page num_values)
-     * @return decoded levels
      */
-    static int[] decodeDefLevels(ByteBuffer buf, int numValues) {
+    static int[] decodeDefLevels(ByteBuffer buf, int bitWidth, int numValues) {
         ByteOrder prevOrder = buf.order();
         buf.order(ByteOrder.LITTLE_ENDIAN);
         int blockLen = buf.getInt();
         buf.order(prevOrder);
-        int blockEnd = buf.position() + blockLen;
+        int endPos = buf.position() + blockLen;
+        int[] out = decodeHybrid(buf, bitWidth, numValues, endPos);
+        if (buf.position() < endPos) buf.position(endPos);
+        return out;
+    }
 
+    /**
+     * Decode {@code numValues} integers from an RLE/Bit-Packed Hybrid stream of arbitrary
+     * bit-width (1..32). Used both for definition levels (after length prefix) and for
+     * dictionary indices in {@code RLE_DICTIONARY} pages (no length prefix; pass {@code endPos}
+     * = {@code buf.limit()} or any safe upper bound).
+     *
+     * <p>The stream is a sequence of runs. Each run begins with an unsigned LEB128 varint header:
+     * <ul>
+     *   <li>{@code (header & 1) == 0} → RLE run: header {@code >>> 1} repetitions of a value
+     *       encoded in {@code ceil(bitWidth/8)} little-endian bytes.</li>
+     *   <li>{@code (header & 1) == 1} → bit-packed run: header {@code >>> 1} groups of 8 values,
+     *       bit-packed LSB-first across {@code groups * bitWidth} bytes.</li>
+     * </ul>
+     */
+    static int[] decodeHybrid(ByteBuffer buf, int bitWidth, int numValues, int endPos) {
         int[] out = new int[numValues];
         int filled = 0;
-        while (filled < numValues && buf.position() < blockEnd) {
+        if (bitWidth == 0) {
+            // All values are zero (occurs when dictionary has a single entry).
+            return out;
+        }
+        while (filled < numValues && buf.position() < endPos) {
             long header = readVarint(buf);
             boolean bitPacked = (header & 1L) == 1L;
             int runLen = (int) (header >>> 1);
             if (bitPacked) {
-                // bit-packed run: runLen groups of 8 values, bit-width 1 → 1 byte per group
-                for (int g = 0; g < runLen; g++) {
-                    int b = buf.get() & 0xFF;
-                    for (int i = 0; i < 8; i++) {
-                        if (filled < numValues) {
-                            out[filled++] = (b >>> i) & 1;
-                        }
+                // bit-packed run: runLen groups of 8 values, packed LSB-first
+                int groupValues = runLen * 8;
+                int totalBytes = runLen * bitWidth;
+                long bitBuf = 0;
+                int bitsInBuf = 0;
+                int byteIdx = 0;
+                int produced = 0;
+                int mask = bitWidth == 32 ? -1 : ((1 << bitWidth) - 1);
+                while (produced < groupValues) {
+                    while (bitsInBuf < bitWidth && byteIdx < totalBytes) {
+                        bitBuf |= ((long) (buf.get() & 0xFF)) << bitsInBuf;
+                        bitsInBuf += 8;
+                        byteIdx++;
                     }
+                    if (bitsInBuf < bitWidth) break;
+                    int v = (int) (bitBuf & 0xFFFFFFFFL & mask);
+                    bitBuf >>>= bitWidth;
+                    bitsInBuf -= bitWidth;
+                    if (filled < numValues) out[filled++] = v;
+                    produced++;
                 }
             } else {
-                // RLE run: single repeated value, bit-width 1 → 1 byte holds the value
-                int value = buf.get() & 1;
+                // RLE run: a single value repeated runLen times
+                int numBytes = (bitWidth + 7) / 8;
+                int v = 0;
+                for (int i = 0; i < numBytes; i++) {
+                    v |= (buf.get() & 0xFF) << (i * 8);
+                }
                 int writable = Math.min(runLen, numValues - filled);
-                for (int i = 0; i < writable; i++) out[filled++] = value;
+                for (int i = 0; i < writable; i++) out[filled++] = v;
             }
         }
-        // Skip any trailing bytes inside the levels block we didn't consume
-        if (buf.position() < blockEnd) buf.position(blockEnd);
         return out;
     }
 

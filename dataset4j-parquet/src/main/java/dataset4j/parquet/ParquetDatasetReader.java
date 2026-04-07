@@ -1,6 +1,8 @@
 package dataset4j.parquet;
 
 import dataset4j.Dataset;
+import dataset4j.annotations.AnnotationProcessor;
+import dataset4j.annotations.ColumnMetadata;
 import org.apache.parquet.format.*;
 
 import java.io.ByteArrayInputStream;
@@ -106,6 +108,30 @@ public class ParquetDatasetReader {
             Class<?>[] paramTypes = new Class<?>[components.length];
             for (int i = 0; i < components.length; i++) paramTypes[i] = components[i].getType();
 
+            // Build a map: Parquet column name → record component index. Honors @DataColumn(name=...)
+            // via ColumnMetadata.getEffectiveColumnName(); falls back to the bare component name so
+            // records without annotations still resolve when names match exactly.
+            Map<String, Integer> parquetColToComponentIdx = new HashMap<>();
+            try {
+                List<ColumnMetadata> colMetas = AnnotationProcessor.extractColumns(recordClass);
+                for (ColumnMetadata cm : colMetas) {
+                    for (int i = 0; i < components.length; i++) {
+                        if (components[i].getName().equals(cm.getFieldName())) {
+                            parquetColToComponentIdx.put(cm.getEffectiveColumnName(), i);
+                            // Also register the bare field name as a fallback for files whose
+                            // schema uses the field name rather than the annotated column name.
+                            parquetColToComponentIdx.putIfAbsent(cm.getFieldName(), i);
+                            break;
+                        }
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // Records without @DataColumn fall back to component-name matching.
+            }
+            for (int i = 0; i < components.length; i++) {
+                parquetColToComponentIdx.putIfAbsent(components[i].getName(), i);
+            }
+
             Constructor<T> ctor;
             try {
                 ctor = recordClass.getDeclaredConstructor(paramTypes);
@@ -117,21 +143,22 @@ public class ParquetDatasetReader {
             List<T> result = new ArrayList<>();
             for (RowGroup rg : fmd.getRow_groups()) {
                 int numRows = (int) rg.getNum_rows();
-                Map<String, Object[]> columnData = new HashMap<>();
+                // values[componentIdx] = decoded column array for that record component (may be null
+                // if the file has no matching column).
+                Object[][] values = new Object[components.length][];
                 for (ColumnChunk cc : rg.getColumns()) {
                     ColumnMetaData cmd = cc.getMeta_data();
                     String colName = cmd.getPath_in_schema().get(0);
+                    Integer compIdx = parquetColToComponentIdx.get(colName);
+                    if (compIdx == null) continue; // file column not present in record — skip
                     SchemaElement se = schemaByName.get(colName);
-                    Object[] values = readColumnChunk(ch, cmd, se, numRows);
-                    columnData.put(colName, values);
+                    values[compIdx] = readColumnChunk(ch, cmd, se, numRows);
                 }
 
                 for (int row = 0; row < numRows; row++) {
                     Object[] args = new Object[components.length];
                     for (int i = 0; i < components.length; i++) {
-                        String name = components[i].getName();
-                        Object[] colVals = columnData.get(name);
-                        Object raw = colVals == null ? null : colVals[row];
+                        Object raw = values[i] == null ? null : values[i][row];
                         args[i] = convertToTarget(raw, components[i].getType());
                     }
                     try {
@@ -177,63 +204,93 @@ public class ParquetDatasetReader {
 
     private Object[] readColumnChunk(FileChannel ch, ColumnMetaData cmd, SchemaElement se, int numRows)
             throws IOException {
-        long offset = cmd.getData_page_offset();
+        // The chunk starts at the dictionary page if one is present, otherwise at the first data page.
+        long firstPageOffset = cmd.isSetDictionary_page_offset() && cmd.getDictionary_page_offset() > 0
+                ? cmd.getDictionary_page_offset()
+                : cmd.getData_page_offset();
         int totalCompressed = (int) cmd.getTotal_compressed_size();
+        ParquetCompressionCodec codec = fromThriftCodec(cmd.getCodec());
+        boolean optional = se.getRepetition_type() == FieldRepetitionType.OPTIONAL;
 
         ByteBuffer chunkBuf = ByteBuffer.allocate(totalCompressed);
-        ch.position(offset);
+        ch.position(firstPageOffset);
         readFully(ch, chunkBuf);
-        byte[] chunkBytes = chunkBuf.array();
+        ByteArrayInputStream bais = new ByteArrayInputStream(chunkBuf.array());
 
-        ByteArrayInputStream bais = new ByteArrayInputStream(chunkBytes);
-        int avail0 = bais.available();
-        PageHeader ph = Util.readPageHeader(bais);
-        int headerLen = avail0 - bais.available();
-
-        if (ph.getType() != PageType.DATA_PAGE) {
-            throw new IOException("Unsupported page type: " + ph.getType()
-                    + " (only DATA_PAGE / DATA_PAGE_V1 is supported)");
-        }
-        DataPageHeader dph = ph.getData_page_header();
-        if (dph.getEncoding() != Encoding.PLAIN) {
-            throw new IOException("Unsupported value encoding: " + dph.getEncoding()
-                    + " (only PLAIN is supported)");
-        }
-
-        int compressedPageSize = ph.getCompressed_page_size();
-        int uncompressedPageSize = ph.getUncompressed_page_size();
-        byte[] compressed = new byte[compressedPageSize];
-        System.arraycopy(chunkBytes, headerLen, compressed, 0, compressedPageSize);
-
-        ParquetCompressionCodec codec = fromThriftCodec(cmd.getCodec());
-        byte[] uncompressed = ParquetIo.decompress(compressed, codec, uncompressedPageSize);
-        ByteBuffer pageBuf = ByteBuffer.wrap(uncompressed);
-
-        boolean optional = se.getRepetition_type() == FieldRepetitionType.OPTIONAL;
-        int pageNumValues = dph.getNum_values();
-
-        int[] defLevels;
-        int nonNullCount;
-        if (optional) {
-            defLevels = ParquetIo.decodeDefLevels(pageBuf, pageNumValues);
-            int nn = 0;
-            for (int v : defLevels) if (v == 1) nn++;
-            nonNullCount = nn;
-        } else {
-            defLevels = null;
-            nonNullCount = pageNumValues;
-        }
-
-        Object[] decoded = decodePlainValues(pageBuf, se, nonNullCount);
-
+        Object[] dictionary = null;
         Object[] out = new Object[numRows];
-        if (defLevels == null) {
-            System.arraycopy(decoded, 0, out, 0, Math.min(decoded.length, numRows));
-        } else {
-            int di = 0;
-            for (int i = 0; i < numRows; i++) {
-                if (defLevels[i] == 1) out[i] = decoded[di++];
-                else out[i] = null;
+        int rowIdx = 0;
+
+        while (rowIdx < numRows && bais.available() > 0) {
+            PageHeader ph = Util.readPageHeader(bais);
+            int compressedPageSize = ph.getCompressed_page_size();
+            int uncompressedPageSize = ph.getUncompressed_page_size();
+            byte[] compressed = bais.readNBytes(compressedPageSize);
+            if (compressed.length != compressedPageSize) {
+                throw new IOException("Truncated page payload: expected " + compressedPageSize
+                        + " bytes, got " + compressed.length);
+            }
+            byte[] uncompressed = ParquetIo.decompress(compressed, codec, uncompressedPageSize);
+            ByteBuffer pageBuf = ByteBuffer.wrap(uncompressed);
+
+            PageType pt = ph.getType();
+            if (pt == PageType.DICTIONARY_PAGE) {
+                DictionaryPageHeader dictHeader = ph.getDictionary_page_header();
+                int numEntries = dictHeader.getNum_values();
+                // Dictionary entries are PLAIN-encoded values of the column's physical type.
+                dictionary = decodePlainValues(pageBuf, se, numEntries);
+                continue;
+            }
+            if (pt != PageType.DATA_PAGE) {
+                throw new IOException("Unsupported page type: " + pt
+                        + " (DATA_PAGE_V1 and DICTIONARY_PAGE supported)");
+            }
+
+            DataPageHeader dph = ph.getData_page_header();
+            int pageNumValues = dph.getNum_values();
+
+            int[] defLevels = null;
+            int nonNullCount;
+            if (optional) {
+                defLevels = ParquetIo.decodeDefLevels(pageBuf, 1, pageNumValues);
+                int nn = 0;
+                for (int v : defLevels) if (v == 1) nn++;
+                nonNullCount = nn;
+            } else {
+                nonNullCount = pageNumValues;
+            }
+
+            Object[] decoded;
+            Encoding enc = dph.getEncoding();
+            if (enc == Encoding.PLAIN) {
+                decoded = decodePlainValues(pageBuf, se, nonNullCount);
+            } else if (enc == Encoding.RLE_DICTIONARY || enc == Encoding.PLAIN_DICTIONARY) {
+                if (dictionary == null) {
+                    throw new IOException("Dictionary-encoded data page for column "
+                            + se.getName() + " has no preceding dictionary page");
+                }
+                int bitWidth = pageBuf.get() & 0xFF;
+                int[] indices = ParquetIo.decodeHybrid(pageBuf, bitWidth, nonNullCount, pageBuf.limit());
+                decoded = new Object[nonNullCount];
+                for (int i = 0; i < nonNullCount; i++) decoded[i] = dictionary[indices[i]];
+            } else {
+                throw new IOException("Unsupported value encoding: " + enc
+                        + " for column " + se.getName()
+                        + " (supported: PLAIN, RLE_DICTIONARY, PLAIN_DICTIONARY)");
+            }
+
+            // Weave decoded values + nulls into the output for this page
+            if (defLevels == null) {
+                int writable = Math.min(pageNumValues, numRows - rowIdx);
+                System.arraycopy(decoded, 0, out, rowIdx, writable);
+                rowIdx += writable;
+            } else {
+                int di = 0;
+                int writable = Math.min(pageNumValues, numRows - rowIdx);
+                for (int i = 0; i < writable; i++) {
+                    if (defLevels[i] == 1) out[rowIdx++] = decoded[di++];
+                    else out[rowIdx++] = null;
+                }
             }
         }
         return out;
@@ -242,6 +299,8 @@ public class ParquetDatasetReader {
     private Object[] decodePlainValues(ByteBuffer buf, SchemaElement se, int n) {
         Type t = se.getType();
         Object[] out = new Object[n];
+        boolean isDecimal = isLogicalDecimal(se);
+        int decimalScale = isDecimal ? se.getScale() : 0;
         switch (t) {
             case BOOLEAN: {
                 boolean[] bs = ParquetIo.decodePlainBooleans(buf, n);
@@ -253,14 +312,20 @@ public class ParquetDatasetReader {
                 boolean isDate = isLogicalDate(se);
                 for (int i = 0; i < n; i++) {
                     int v = le.getInt();
-                    out[i] = isDate ? LocalDate.ofEpochDay(v) : Integer.valueOf(v);
+                    if (isDate) out[i] = LocalDate.ofEpochDay(v);
+                    else if (isDecimal) out[i] = BigDecimal.valueOf((long) v, decimalScale);
+                    else out[i] = Integer.valueOf(v);
                 }
                 buf.position(buf.position() + n * 4);
                 return out;
             }
             case INT64: {
                 ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
-                for (int i = 0; i < n; i++) out[i] = le.getLong();
+                for (int i = 0; i < n; i++) {
+                    long v = le.getLong();
+                    if (isDecimal) out[i] = BigDecimal.valueOf(v, decimalScale);
+                    else out[i] = Long.valueOf(v);
+                }
                 buf.position(buf.position() + n * 8);
                 return out;
             }
@@ -278,8 +343,6 @@ public class ParquetDatasetReader {
             }
             case BYTE_ARRAY: {
                 boolean isString = isLogicalString(se);
-                boolean isDecimal = isLogicalDecimal(se);
-                int decimalScale = isDecimal ? se.getScale() : 0;
                 ByteBuffer le = buf.order(ByteOrder.LITTLE_ENDIAN);
                 for (int i = 0; i < n; i++) {
                     int len = le.getInt();
@@ -290,8 +353,20 @@ public class ParquetDatasetReader {
                     } else if (isString) {
                         out[i] = new String(bytes, StandardCharsets.UTF_8);
                     } else {
-                        // Default: treat as UTF-8 string for unannotated BYTE_ARRAY
                         out[i] = new String(bytes, StandardCharsets.UTF_8);
+                    }
+                }
+                return out;
+            }
+            case FIXED_LEN_BYTE_ARRAY: {
+                int len = se.getType_length();
+                for (int i = 0; i < n; i++) {
+                    byte[] bytes = new byte[len];
+                    buf.get(bytes);
+                    if (isDecimal) {
+                        out[i] = new BigDecimal(new BigInteger(bytes), decimalScale);
+                    } else {
+                        out[i] = bytes;
                     }
                 }
                 return out;
