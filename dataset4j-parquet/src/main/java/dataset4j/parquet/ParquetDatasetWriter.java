@@ -2,557 +2,535 @@ package dataset4j.parquet;
 
 import dataset4j.Dataset;
 import dataset4j.annotations.*;
+import org.apache.parquet.format.*;
 
+import java.io.ByteArrayOutputStream;
+import java.io.FileOutputStream;
+import java.io.FilterOutputStream;
 import java.io.IOException;
-import java.io.RandomAccessFile;
+import java.io.OutputStream;
 import java.lang.reflect.RecordComponent;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
- * Lightweight Parquet writer with minimal dependencies.
- * Custom implementation avoiding heavy Hadoop dependencies.
- * 
- * Example usage:
- * {@code
+ * Lightweight Parquet writer producing spec-compliant Parquet 1.0 files.
+ *
+ * <p>Writes a single data page per column chunk using PLAIN value encoding and
+ * RLE/Bit-Packed Hybrid definition-level encoding (bit-width 1) for nullable columns.
+ * Files are interoperable with standard Parquet readers (parquet-mr, pyarrow, DuckDB,
+ * etc.) for the supported types.
+ *
+ * <p>Supported Java types: {@code Boolean, Integer, Long, Float, Double, String,
+ * BigDecimal, LocalDate}. {@code BigDecimal} is stored as a UTF-8 string by default
+ * (logical type STRING). Call {@link #withBigDecimalAsLogicalType(boolean)} to instead
+ * use the proper {@code DECIMAL(precision, scale)} logical type — precision and scale
+ * are derived from the data (max scale across all values; expanding scale never loses
+ * precision).
+ *
+ * <p>Example:
+ * <pre>{@code
  * ParquetDatasetWriter
  *     .toFile("employees.parquet")
  *     .withCompression(ParquetCompressionCodec.SNAPPY)
- *     .withRowGroupSize(100000)
  *     .write(employees);
- * }
+ * }</pre>
  */
 public class ParquetDatasetWriter {
-    
+
     private final Path filePath;
     private ParquetCompressionCodec compressionCodec = ParquetCompressionCodec.SNAPPY;
     private int rowGroupSize = 50000;
-    private boolean enableDictionary = true;
-    private Map<String, Object> metadata = new HashMap<>();
+    private boolean bigDecimalAsLogicalDecimal = false;
+    private final Map<String, String> keyValueMetadata = new HashMap<>();
 
-    // Field selection support
+    // Field selection support (preserved from previous API)
     private PojoMetadata<?> pojoMetadata;
     private FieldSelector<?> fieldSelector;
-    private List<FieldMeta> selectedFields;
-    
+
     private ParquetDatasetWriter(String filePath) {
         this.filePath = Paths.get(filePath);
     }
-    
-    /**
-     * Create writer for Parquet file.
-     * @param filePath path to output Parquet file
-     * @return new writer instance
-     */
+
+    /** Create a writer for the given output path. */
     public static ParquetDatasetWriter toFile(String filePath) {
-        // Validate file path to prevent directory traversal attacks
         Path path = Paths.get(filePath).normalize();
         if (path.toString().contains("..")) {
             throw new SecurityException("Path traversal detected in file path: " + filePath);
         }
         return new ParquetDatasetWriter(filePath);
     }
-    
-    /**
-     * Set compression codec for writing.
-     * @param codec compression codec
-     * @return this writer for chaining
-     */
+
     public ParquetDatasetWriter withCompression(ParquetCompressionCodec codec) {
         this.compressionCodec = codec;
         return this;
     }
-    
-    /**
-     * Set row group size (number of rows per row group).
-     * @param size row group size
-     * @return this writer for chaining
-     */
+
     public ParquetDatasetWriter withRowGroupSize(int size) {
         this.rowGroupSize = size;
         return this;
     }
-    
+
     /**
-     * Enable or disable dictionary encoding.
-     * @param enable true to enable dictionary encoding
-     * @return this writer for chaining
+     * Encode {@code BigDecimal} columns using the Parquet {@code DECIMAL} logical type
+     * (BYTE_ARRAY of two's-complement big-endian unscaled value) instead of the default
+     * stringified representation. Precision/scale are derived from the data: scale is
+     * the maximum scale found in non-null values across the dataset; precision is the
+     * maximum digit count of the corresponding unscaled values.
      */
-    public ParquetDatasetWriter withDictionary(boolean enable) {
-        this.enableDictionary = enable;
+    public ParquetDatasetWriter withBigDecimalAsLogicalType(boolean enable) {
+        this.bigDecimalAsLogicalDecimal = enable;
         return this;
     }
-    
-    /**
-     * Add custom metadata to the file.
-     * @param key metadata key
-     * @param value metadata value
-     * @return this writer for chaining
-     */
-    public ParquetDatasetWriter withMetadata(String key, Object value) {
-        this.metadata.put(key, value);
+
+    /** Add a key/value entry to the file's key_value_metadata. */
+    public ParquetDatasetWriter withMetadata(String key, String value) {
+        this.keyValueMetadata.put(key, value);
         return this;
     }
-    
-    /**
-     * Select specific fields to export by field names.
-     * @param fieldNames field names to include
-     * @return this writer for chaining
-     */
+
     public ParquetDatasetWriter fields(String... fieldNames) {
-        if (pojoMetadata != null) {
-            this.fieldSelector = FieldSelector.from(pojoMetadata).fields(fieldNames);
-        }
+        if (pojoMetadata != null) this.fieldSelector = FieldSelector.from(pojoMetadata).fields(fieldNames);
         return this;
     }
 
-    /**
-     * Select specific fields to export by column names.
-     * @param columnNames column names to include
-     * @return this writer for chaining
-     */
     public ParquetDatasetWriter columns(String... columnNames) {
-        if (pojoMetadata != null) {
-            this.fieldSelector = FieldSelector.from(pojoMetadata).columns(columnNames);
-        }
+        if (pojoMetadata != null) this.fieldSelector = FieldSelector.from(pojoMetadata).columns(columnNames);
         return this;
     }
 
-    /**
-     * Select fields using generated field constants array.
-     * @param fieldConstants array of field name constants
-     * @return this writer for chaining
-     */
     public ParquetDatasetWriter fieldsArray(String[] fieldConstants) {
-        if (pojoMetadata != null) {
-            this.fieldSelector = FieldSelector.from(pojoMetadata).fieldsArray(fieldConstants);
-        }
+        if (pojoMetadata != null) this.fieldSelector = FieldSelector.from(pojoMetadata).fieldsArray(fieldConstants);
         return this;
     }
 
-    /**
-     * Select fields using generated column constants array.
-     * @param columnConstants array of column name constants
-     * @return this writer for chaining
-     */
     public ParquetDatasetWriter columnsArray(String[] columnConstants) {
-        if (pojoMetadata != null) {
-            this.fieldSelector = FieldSelector.from(pojoMetadata).columnsArray(columnConstants);
-        }
+        if (pojoMetadata != null) this.fieldSelector = FieldSelector.from(pojoMetadata).columnsArray(columnConstants);
         return this;
     }
 
-    /**
-     * Exclude specific fields from export.
-     * @param fieldNames field names to exclude
-     * @return this writer for chaining
-     */
     public ParquetDatasetWriter exclude(String... fieldNames) {
         if (pojoMetadata != null) {
-            if (this.fieldSelector == null) {
-                this.fieldSelector = FieldSelector.from(pojoMetadata);
-            }
+            if (this.fieldSelector == null) this.fieldSelector = FieldSelector.from(pojoMetadata);
             this.fieldSelector = this.fieldSelector.exclude(fieldNames);
         }
         return this;
     }
 
-    /**
-     * Select only required fields for export.
-     * @return this writer for chaining
-     */
     public ParquetDatasetWriter requiredOnly() {
-        if (pojoMetadata != null) {
-            this.fieldSelector = FieldSelector.from(pojoMetadata).requiredOnly();
-        }
+        if (pojoMetadata != null) this.fieldSelector = FieldSelector.from(pojoMetadata).requiredOnly();
         return this;
     }
 
-    /**
-     * Select only exportable fields (not ignored or hidden).
-     * @return this writer for chaining
-     */
     public ParquetDatasetWriter exportableOnly() {
-        if (pojoMetadata != null) {
-            this.fieldSelector = FieldSelector.from(pojoMetadata).exportableOnly();
-        }
+        if (pojoMetadata != null) this.fieldSelector = FieldSelector.from(pojoMetadata).exportableOnly();
         return this;
     }
 
-    /**
-     * Use pre-built metadata for field selection.
-     * @param <T> record type
-     * @param metadata POJO metadata
-     * @return this writer for chaining
-     */
-    @SuppressWarnings("unchecked")
     public <T> ParquetDatasetWriter select(PojoMetadata<T> metadata) {
         this.pojoMetadata = metadata;
         return this;
     }
 
-    /**
-     * Use custom field selector for advanced field selection.
-     * @param <T> record type
-     * @param selector field selector
-     * @return this writer for chaining
-     */
-    @SuppressWarnings("unchecked")
     public <T> ParquetDatasetWriter select(FieldSelector<T> selector) {
         this.fieldSelector = selector;
         return this;
     }
 
-    /**
-     * Write Dataset to Parquet file.
-     * @param <T> record type
-     * @param dataset dataset to write
-     * @throws IOException if file cannot be written
-     */
+    /** Write a Dataset to a Parquet file. */
     public <T> void write(Dataset<T> dataset) throws IOException {
         if (dataset.isEmpty()) {
             throw new IllegalArgumentException("Cannot write empty dataset");
         }
 
-        Class<?> recordClass = dataset.toList().get(0).getClass();
+        List<T> records = dataset.toList();
+        Class<?> recordClass = records.get(0).getClass();
         if (!recordClass.isRecord()) {
             throw new IllegalArgumentException("Dataset must contain record types");
         }
 
-        // Initialize metadata if not set
         if (pojoMetadata == null) {
             @SuppressWarnings("unchecked")
             Class<Object> typedClass = (Class<Object>) recordClass;
             pojoMetadata = MetadataCache.getMetadata(typedClass);
         }
 
-        // Determine which fields to export
         List<FieldMeta> fieldsToExport;
         if (fieldSelector != null) {
             fieldsToExport = fieldSelector.select();
-        } else if (selectedFields != null) {
-            fieldsToExport = selectedFields;
         } else {
             fieldsToExport = pojoMetadata.getExportableFields();
         }
-
         if (fieldsToExport.isEmpty()) {
             throw new IllegalArgumentException("No fields selected for export. Ensure record has @DataColumn annotations.");
         }
 
         RecordComponent[] components = recordClass.getRecordComponents();
+        List<LeafColumn> leaves = buildLeafColumns(fieldsToExport, components, records);
 
-        try (RandomAccessFile raf = new RandomAccessFile(filePath.toFile(), "rw");
-             FileChannel channel = raf.getChannel()) {
+        try (FileOutputStream fos = new FileOutputStream(filePath.toFile());
+             CountingOutputStream out = new CountingOutputStream(fos)) {
 
-            // Create schema from field metadata
-            ParquetSchema schema = createSchema(fieldsToExport);
+            // File magic
+            out.write(ParquetIo.MAGIC);
 
-            // Write magic number at start
-            writeMagicNumber(channel);
+            // Row groups
+            List<RowGroup> rowGroups = new ArrayList<>();
+            for (int start = 0; start < records.size(); start += rowGroupSize) {
+                int end = Math.min(start + rowGroupSize, records.size());
+                List<T> chunk = records.subList(start, end);
+                rowGroups.add(writeRowGroup(out, chunk, leaves));
+            }
 
-            // Write data in row groups
-            List<ParquetRowGroup> rowGroups = writeRowGroups(channel, dataset.toList(), schema, fieldsToExport, components);
+            // Schema (root + leaves)
+            List<SchemaElement> schema = buildSchemaElements(leaves);
 
-            // Write footer with metadata
-            long footerOffset = channel.position();
-            writeFooter(channel, schema, rowGroups);
+            // FileMetaData
+            FileMetaData fmd = new FileMetaData(1, schema, records.size(), rowGroups);
+            fmd.setCreated_by("dataset4j-parquet");
+            if (!keyValueMetadata.isEmpty()) {
+                List<KeyValue> kvs = new ArrayList<>();
+                for (Map.Entry<String, String> e : keyValueMetadata.entrySet()) {
+                    KeyValue kv = new KeyValue(e.getKey());
+                    kv.setValue(e.getValue());
+                    kvs.add(kv);
+                }
+                fmd.setKey_value_metadata(kvs);
+            }
 
-            // Write footer length and magic number at end
-            writeFooterLength(channel, (int) (channel.position() - footerOffset));
-            writeMagicNumber(channel);
+            // Footer + length + magic
+            long footerStart = out.getCount();
+            Util.writeFileMetaData(fmd, out);
+            int footerLength = (int) (out.getCount() - footerStart);
+            out.write(intToLeBytes(footerLength));
+            out.write(ParquetIo.MAGIC);
         }
     }
 
-    // Private implementation methods
+    // ---------- Row group / column chunk writing ----------
 
-    private ParquetSchema createSchema(List<FieldMeta> fields) {
-        ParquetSchema schema = new ParquetSchema();
+    private <T> RowGroup writeRowGroup(CountingOutputStream out, List<T> records, List<LeafColumn> leaves)
+            throws IOException {
+        long rgStart = out.getCount();
+        List<ColumnChunk> chunks = new ArrayList<>();
+        long totalUncompressed = 0;
+        long totalCompressed = 0;
 
-        for (FieldMeta field : fields) {
-            if (!field.isIgnored()) {
-                ParquetDataType dataType = ParquetDataType.fromJavaClass(field.getFieldType());
-                ParquetColumn column = new ParquetColumn(
-                    field.getFieldName(),
-                    dataType,
-                    field.isRequired()
-                );
-                schema.addColumn(column);
-            }
+        for (LeafColumn leaf : leaves) {
+            ColumnChunkResult ccr = writeColumnChunk(out, records, leaf);
+            chunks.add(ccr.chunk);
+            totalUncompressed += ccr.uncompressed;
+            totalCompressed += ccr.compressed;
         }
 
+        RowGroup rg = new RowGroup(chunks, totalUncompressed, records.size());
+        rg.setFile_offset(rgStart);
+        rg.setTotal_compressed_size(totalCompressed);
+        return rg;
+    }
+
+    private <T> ColumnChunkResult writeColumnChunk(CountingOutputStream out, List<T> records, LeafColumn leaf)
+            throws IOException {
+        // Extract values
+        List<Object> values = new ArrayList<>(records.size());
+        int nonNull = 0;
+        for (T r : records) {
+            Object v;
+            try {
+                v = leaf.component.getAccessor().invoke(r);
+            } catch (ReflectiveOperationException e) {
+                throw new IOException("Failed to read field " + leaf.name, e);
+            }
+            values.add(v);
+            if (v != null) nonNull++;
+        }
+
+        boolean optional = !leaf.required;
+
+        // Build page payload: [def_levels?][plain_values]
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        if (optional) {
+            int[] levels = new int[values.size()];
+            for (int i = 0; i < values.size(); i++) levels[i] = values.get(i) == null ? 0 : 1;
+            payload.write(ParquetIo.encodeDefLevels(levels));
+        }
+        byte[] plainValues = encodePlainValues(values, leaf, nonNull);
+        payload.write(plainValues);
+
+        byte[] uncompressed = payload.toByteArray();
+        byte[] compressed = ParquetIo.compress(uncompressed, compressionCodec);
+
+        // PageHeader (DATA_PAGE_V1)
+        PageHeader pageHeader = new PageHeader(PageType.DATA_PAGE, uncompressed.length, compressed.length);
+        DataPageHeader dph = new DataPageHeader(values.size(),
+                Encoding.PLAIN,
+                Encoding.RLE,
+                Encoding.RLE);
+        pageHeader.setData_page_header(dph);
+
+        long chunkStart = out.getCount();
+        Util.writePageHeader(pageHeader, out);
+        out.write(compressed);
+        long chunkEnd = out.getCount();
+
+        // ColumnMetaData
+        ColumnMetaData cmd = new ColumnMetaData(
+                leaf.physicalType,
+                List.of(Encoding.RLE, Encoding.PLAIN),
+                List.of(leaf.name),
+                toThriftCodec(compressionCodec),
+                values.size(),
+                (long) (uncompressed.length + (chunkEnd - chunkStart - compressed.length)),
+                chunkEnd - chunkStart,
+                chunkStart);
+        cmd.setData_page_offset(chunkStart);
+
+        ColumnChunk chunk = new ColumnChunk(chunkStart);
+        chunk.setMeta_data(cmd);
+
+        ColumnChunkResult res = new ColumnChunkResult();
+        res.chunk = chunk;
+        res.uncompressed = cmd.getTotal_uncompressed_size();
+        res.compressed = cmd.getTotal_compressed_size();
+        return res;
+    }
+
+    private byte[] encodePlainValues(List<Object> values, LeafColumn leaf, int nonNull) throws IOException {
+        Type t = leaf.physicalType;
+        switch (t) {
+            case BOOLEAN: {
+                boolean[] bs = new boolean[nonNull];
+                int i = 0;
+                for (Object v : values) if (v != null) bs[i++] = (Boolean) v;
+                return ParquetIo.encodePlainBooleans(bs);
+            }
+            case INT32: {
+                ByteBuffer bb = ParquetIo.leBuffer(nonNull * 4);
+                for (Object v : values) {
+                    if (v == null) continue;
+                    bb.putInt(toInt32(v, leaf));
+                }
+                return bb.array();
+            }
+            case INT64: {
+                ByteBuffer bb = ParquetIo.leBuffer(nonNull * 8);
+                for (Object v : values) {
+                    if (v == null) continue;
+                    bb.putLong((Long) v);
+                }
+                return bb.array();
+            }
+            case FLOAT: {
+                ByteBuffer bb = ParquetIo.leBuffer(nonNull * 4);
+                for (Object v : values) {
+                    if (v == null) continue;
+                    bb.putFloat((Float) v);
+                }
+                return bb.array();
+            }
+            case DOUBLE: {
+                ByteBuffer bb = ParquetIo.leBuffer(nonNull * 8);
+                for (Object v : values) {
+                    if (v == null) continue;
+                    bb.putDouble((Double) v);
+                }
+                return bb.array();
+            }
+            case BYTE_ARRAY: {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                for (Object v : values) {
+                    if (v == null) continue;
+                    byte[] bytes = byteArrayValue(v, leaf);
+                    baos.write(intToLeBytes(bytes.length));
+                    baos.write(bytes);
+                }
+                return baos.toByteArray();
+            }
+            default:
+                throw new UnsupportedOperationException("Physical type not supported: " + t);
+        }
+    }
+
+    private int toInt32(Object v, LeafColumn leaf) {
+        if (v instanceof Integer i) return i;
+        if (v instanceof LocalDate d) return (int) d.toEpochDay();
+        throw new IllegalStateException("Cannot encode " + v.getClass() + " as INT32 for column " + leaf.name);
+    }
+
+    private byte[] byteArrayValue(Object v, LeafColumn leaf) {
+        if (v instanceof String s) return s.getBytes(StandardCharsets.UTF_8);
+        if (v instanceof BigDecimal bd) {
+            if (leaf.decimalScale >= 0) {
+                BigDecimal scaled = bd.setScale(leaf.decimalScale, java.math.RoundingMode.UNNECESSARY);
+                BigInteger unscaled = scaled.unscaledValue();
+                return unscaled.toByteArray(); // signed two's-complement BE
+            }
+            return bd.toPlainString().getBytes(StandardCharsets.UTF_8);
+        }
+        if (v instanceof byte[] b) return b;
+        // Fallback: toString
+        return v.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    // ---------- Schema construction ----------
+
+    private List<LeafColumn> buildLeafColumns(List<FieldMeta> fields, RecordComponent[] components, List<?> records) {
+        List<LeafColumn> leaves = new ArrayList<>();
+        for (FieldMeta fm : fields) {
+            if (fm.isIgnored()) continue;
+            RecordComponent comp = findComponent(components, fm.getFieldName());
+            if (comp == null) continue;
+
+            LeafColumn lc = new LeafColumn();
+            lc.name = fm.getFieldName();
+            lc.required = fm.isRequired();
+            lc.component = comp;
+            lc.javaType = comp.getType();
+
+            Class<?> jt = lc.javaType;
+            if (jt == Boolean.class || jt == boolean.class) {
+                lc.physicalType = Type.BOOLEAN;
+            } else if (jt == Integer.class || jt == int.class) {
+                lc.physicalType = Type.INT32;
+            } else if (jt == Long.class || jt == long.class) {
+                lc.physicalType = Type.INT64;
+            } else if (jt == Float.class || jt == float.class) {
+                lc.physicalType = Type.FLOAT;
+            } else if (jt == Double.class || jt == double.class) {
+                lc.physicalType = Type.DOUBLE;
+            } else if (jt == String.class) {
+                lc.physicalType = Type.BYTE_ARRAY;
+                lc.logicalType = LogicalType.STRING(new StringType());
+                lc.convertedType = ConvertedType.UTF8;
+            } else if (jt == LocalDate.class) {
+                lc.physicalType = Type.INT32;
+                lc.logicalType = LogicalType.DATE(new DateType());
+                lc.convertedType = ConvertedType.DATE;
+            } else if (jt == BigDecimal.class) {
+                lc.physicalType = Type.BYTE_ARRAY;
+                if (bigDecimalAsLogicalDecimal) {
+                    int[] ps = computeDecimalPrecisionScale(records, comp);
+                    lc.decimalPrecision = ps[0];
+                    lc.decimalScale = ps[1];
+                    lc.logicalType = LogicalType.DECIMAL(new DecimalType(ps[1], ps[0]));
+                    lc.convertedType = ConvertedType.DECIMAL;
+                } else {
+                    lc.logicalType = LogicalType.STRING(new StringType());
+                    lc.convertedType = ConvertedType.UTF8;
+                }
+            } else if (jt == byte[].class) {
+                lc.physicalType = Type.BYTE_ARRAY;
+            } else {
+                throw new IllegalArgumentException("Unsupported field type for Parquet: " + jt.getName()
+                        + " (field " + fm.getFieldName() + ")");
+            }
+            leaves.add(lc);
+        }
+        return leaves;
+    }
+
+    private static int[] computeDecimalPrecisionScale(List<?> records, RecordComponent comp) {
+        int scale = 0;
+        int precision = 1;
+        for (Object r : records) {
+            try {
+                Object v = comp.getAccessor().invoke(r);
+                if (v instanceof BigDecimal bd) {
+                    if (bd.scale() > scale) scale = bd.scale();
+                }
+            } catch (ReflectiveOperationException ignored) {}
+        }
+        // Second pass with final scale to compute precision after rescaling
+        for (Object r : records) {
+            try {
+                Object v = comp.getAccessor().invoke(r);
+                if (v instanceof BigDecimal bd) {
+                    BigDecimal rescaled = bd.setScale(scale, java.math.RoundingMode.UNNECESSARY);
+                    int p = rescaled.unscaledValue().abs().toString().length();
+                    if (p > precision) precision = p;
+                }
+            } catch (ReflectiveOperationException ignored) {}
+        }
+        return new int[]{precision, scale};
+    }
+
+    private List<SchemaElement> buildSchemaElements(List<LeafColumn> leaves) {
+        List<SchemaElement> schema = new ArrayList<>();
+        SchemaElement root = new SchemaElement("root");
+        root.setNum_children(leaves.size());
+        schema.add(root);
+
+        for (LeafColumn lc : leaves) {
+            SchemaElement se = new SchemaElement(lc.name);
+            se.setType(lc.physicalType);
+            se.setRepetition_type(lc.required ? FieldRepetitionType.REQUIRED : FieldRepetitionType.OPTIONAL);
+            if (lc.logicalType != null) se.setLogicalType(lc.logicalType);
+            if (lc.convertedType != null) se.setConverted_type(lc.convertedType);
+            if (lc.decimalScale >= 0) {
+                se.setScale(lc.decimalScale);
+                se.setPrecision(lc.decimalPrecision);
+            }
+            schema.add(se);
+        }
         return schema;
     }
 
-    private void writeMagicNumber(FileChannel channel) throws IOException {
-        ByteBuffer magic = ByteBuffer.wrap("PAR1".getBytes());
-        channel.write(magic);
-    }
-
-    private <T> List<ParquetRowGroup> writeRowGroups(FileChannel channel, List<T> records,
-                                                   ParquetSchema schema, List<FieldMeta> fields,
-                                                   RecordComponent[] components)
-            throws IOException {
-
-        List<ParquetRowGroup> rowGroups = new ArrayList<>();
-
-        // Process records in chunks (row groups)
-        for (int startIndex = 0; startIndex < records.size(); startIndex += rowGroupSize) {
-            int endIndex = Math.min(startIndex + rowGroupSize, records.size());
-            List<T> rowGroupRecords = records.subList(startIndex, endIndex);
-
-            ParquetRowGroup rowGroup = writeRowGroup(channel, rowGroupRecords, schema, fields, components);
-            rowGroups.add(rowGroup);
-        }
-
-        return rowGroups;
-    }
-
-    private <T> ParquetRowGroup writeRowGroup(FileChannel channel, List<T> records,
-                                            ParquetSchema schema, List<FieldMeta> fields,
-                                            RecordComponent[] components)
-            throws IOException {
-
-        long rowGroupStart = channel.position();
-        List<ParquetColumnChunk> columnChunks = new ArrayList<>();
-
-        // Write each column as a separate chunk
-        for (ParquetColumn schemaColumn : schema.getColumns()) {
-            RecordComponent component = findComponent(components, schemaColumn.getName());
-            if (component != null) {
-                ParquetColumnChunk chunk = writeColumnChunk(channel, records, schemaColumn, component);
-                columnChunks.add(chunk);
-            }
-        }
-
-        long totalSize = channel.position() - rowGroupStart;
-
-        return new ParquetRowGroup(columnChunks, records.size(), totalSize);
-    }
-
-    private RecordComponent findComponent(RecordComponent[] components, String fieldName) {
-        for (RecordComponent component : components) {
-            if (component.getName().equals(fieldName)) {
-                return component;
-            }
-        }
+    private static RecordComponent findComponent(RecordComponent[] components, String name) {
+        for (RecordComponent c : components) if (c.getName().equals(name)) return c;
         return null;
     }
 
-    private <T> ParquetColumnChunk writeColumnChunk(FileChannel channel, List<T> records,
-                                                  ParquetColumn schemaColumn, RecordComponent component)
-            throws IOException {
-
-        long chunkStart = channel.position();
-
-        // Extract column values from all records
-        List<Object> columnValues = extractColumnValues(records, component);
-
-        // Encode values (simplified - real implementation would support multiple encodings)
-        ByteBuffer encodedData = encodeColumnValues(columnValues, schemaColumn.getDataType());
-
-        // Compress if needed
-        ByteBuffer compressedData = compress(encodedData, compressionCodec);
-
-        // Write page header (simplified)
-        writePageHeader(channel, compressedData.remaining(), encodedData.remaining(), columnValues.size());
-
-        // Write compressed data
-        channel.write(compressedData);
-
-        long chunkEnd = channel.position();
-        int compressedSize = (int) (chunkEnd - chunkStart);
-
-        return new ParquetColumnChunk(
-            schemaColumn.getName(),
-            schemaColumn.getDataType(),
-            chunkStart,
-            compressedSize,
-            encodedData.remaining(),
-            compressionCodec,
-            columnValues.size()
-        );
-    }
-
-    private <T> List<Object> extractColumnValues(List<T> records, RecordComponent component) {
-        List<Object> values = new ArrayList<>();
-
-        for (T record : records) {
-            try {
-                Object value = component.getAccessor().invoke(record);
-                values.add(value);
-            } catch (Exception e) {
-                values.add(null);
-            }
-        }
-
-        return values;
-    }
-    
-    private ByteBuffer encodeColumnValues(List<Object> values, ParquetDataType dataType) throws IOException {
-        // This is a simplified PLAIN encoding implementation
-        // Real Parquet supports multiple encodings: PLAIN, DICTIONARY, RLE, DELTA, etc.
-        
-        ByteBuffer buffer = ByteBuffer.allocate(estimateEncodedSize(values, dataType));
-        
-        for (Object value : values) {
-            if (value == null) {
-                // Handle null values (would need proper definition levels in real implementation)
-                continue;
-            }
-            
-            switch (dataType) {
-                case BOOLEAN -> buffer.put((byte) (((Boolean) value) ? 1 : 0));
-                case INT32 -> buffer.putInt((Integer) value);
-                case INT64 -> buffer.putLong((Long) value);
-                case FLOAT -> buffer.putFloat((Float) value);
-                case DOUBLE -> buffer.putDouble((Double) value);
-                case BYTE_ARRAY -> {
-                    byte[] bytes = value.toString().getBytes();
-                    buffer.putInt(bytes.length);
-                    buffer.put(bytes);
-                }
-                default -> throw new UnsupportedOperationException("Data type not supported: " + dataType);
-            }
-        }
-        
-        buffer.flip();
-        return buffer;
-    }
-    
-    private int estimateEncodedSize(List<Object> values, ParquetDataType dataType) {
-        // Rough estimation for buffer allocation
-        int baseSize = switch (dataType) {
-            case BOOLEAN -> 1;
-            case INT32, FLOAT -> 4;
-            case INT64, DOUBLE -> 8;
-            case BYTE_ARRAY -> 50; // Rough estimate
-            default -> 10;
+    private static CompressionCodec toThriftCodec(ParquetCompressionCodec c) {
+        return switch (c) {
+            case UNCOMPRESSED -> CompressionCodec.UNCOMPRESSED;
+            case SNAPPY -> CompressionCodec.SNAPPY;
+            case GZIP -> CompressionCodec.GZIP;
+            case LZ4 -> CompressionCodec.LZ4_RAW;
+            case BROTLI -> CompressionCodec.BROTLI;
         };
-        
-        return values.size() * baseSize + 1024; // Extra padding
     }
-    
-    private ByteBuffer compress(ByteBuffer data, ParquetCompressionCodec codec) throws IOException {
-        if (codec == ParquetCompressionCodec.UNCOMPRESSED) {
-            return data;
-        }
-        
-        byte[] uncompressed = new byte[data.remaining()];
-        data.get(uncompressed);
-        
-        byte[] compressed = switch (codec) {
-            case SNAPPY -> {
-                try {
-                    yield org.xerial.snappy.Snappy.compress(uncompressed);
-                } catch (Exception e) {
-                    throw new IOException("Failed to compress with SNAPPY", e);
-                }
-            }
-            case GZIP -> {
-                try (java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
-                     java.util.zip.GZIPOutputStream gzipOut = new java.util.zip.GZIPOutputStream(baos)) {
-                    gzipOut.write(uncompressed);
-                    gzipOut.finish();
-                    yield baos.toByteArray();
-                } catch (Exception e) {
-                    throw new IOException("Failed to compress with GZIP", e);
-                }
-            }
-            case LZ4 -> {
-                try {
-                    net.jpountz.lz4.LZ4Factory factory = net.jpountz.lz4.LZ4Factory.fastestInstance();
-                    net.jpountz.lz4.LZ4Compressor compressor = factory.fastCompressor();
-                    int maxCompressedLength = compressor.maxCompressedLength(uncompressed.length);
-                    byte[] compressedBuffer = new byte[maxCompressedLength];
-                    int compressedLength = compressor.compress(uncompressed, 0, uncompressed.length, 
-                                                             compressedBuffer, 0, maxCompressedLength);
-                    byte[] result = new byte[compressedLength];
-                    System.arraycopy(compressedBuffer, 0, result, 0, compressedLength);
-                    yield result;
-                } catch (Exception e) {
-                    throw new IOException("Failed to compress with LZ4", e);
-                }
-            }
-            default -> throw new UnsupportedOperationException("Compression codec not supported: " + codec);
-        };
-        
-        return ByteBuffer.wrap(compressed);
+
+    private static byte[] intToLeBytes(int v) {
+        return ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array();
     }
-    
-    private void writePageHeader(FileChannel channel, int compressedPageSize, 
-                               int uncompressedPageSize, int numValues) throws IOException {
-        
-        // Simplified page header (real implementation would use Thrift)
-        ByteBuffer header = ByteBuffer.allocate(16);
-        header.putInt(compressedPageSize);
-        header.putInt(uncompressedPageSize);
-        header.putInt(numValues);
-        header.putInt(0); // Padding
-        header.flip();
-        
-        channel.write(header);
+
+    // ---------- Helper types ----------
+
+    private static final class LeafColumn {
+        String name;
+        boolean required;
+        RecordComponent component;
+        Class<?> javaType;
+        Type physicalType;
+        LogicalType logicalType;
+        ConvertedType convertedType;
+        int decimalPrecision = -1;
+        int decimalScale = -1;
     }
-    
-    private void writeFooter(FileChannel channel, ParquetSchema schema, List<ParquetRowGroup> rowGroups)
-            throws IOException {
-        
-        // This is a simplified footer implementation
-        // Real Parquet uses Thrift serialization for the footer
-        
-        ByteBuffer footer = ByteBuffer.allocate(1024);
-        
-        // Write schema info
-        footer.putInt(schema.getColumnCount());
-        for (ParquetColumn column : schema.getColumns()) {
-            writeString(footer, column.getName());
-            footer.putInt(column.getDataType().ordinal());
-        }
-        
-        // Write row group info
-        footer.putInt(rowGroups.size());
-        for (ParquetRowGroup rowGroup : rowGroups) {
-            footer.putLong(rowGroup.getNumRows());
-            footer.putLong(rowGroup.getTotalByteSize());
-            footer.putInt(rowGroup.getColumnChunks().size());
-            
-            for (ParquetColumnChunk chunk : rowGroup.getColumnChunks()) {
-                writeString(footer, chunk.getColumnPath());
-                footer.putLong(chunk.getFileOffset());
-                footer.putInt(chunk.getCompressedSize());
-                footer.putInt(chunk.getUncompressedSize());
-                footer.putLong(chunk.getNumValues());
-            }
-        }
-        
-        // Write custom metadata
-        footer.putInt(metadata.size());
-        for (Map.Entry<String, Object> entry : metadata.entrySet()) {
-            writeString(footer, entry.getKey());
-            writeString(footer, entry.getValue().toString());
-        }
-        
-        footer.flip();
-        channel.write(footer);
+
+    private static final class ColumnChunkResult {
+        ColumnChunk chunk;
+        long uncompressed;
+        long compressed;
     }
-    
-    private void writeString(ByteBuffer buffer, String str) {
-        byte[] bytes = str.getBytes();
-        buffer.putInt(bytes.length);
-        buffer.put(bytes);
-    }
-    
-    private void writeFooterLength(FileChannel channel, int footerLength) throws IOException {
-        ByteBuffer lengthBuffer = ByteBuffer.allocate(4);
-        lengthBuffer.putInt(footerLength);
-        lengthBuffer.flip();
-        channel.write(lengthBuffer);
+
+    /** OutputStream that tracks the total number of bytes written. */
+    private static final class CountingOutputStream extends FilterOutputStream {
+        private long count = 0;
+        CountingOutputStream(OutputStream out) { super(out); }
+        @Override public void write(int b) throws IOException { out.write(b); count++; }
+        @Override public void write(byte[] b, int off, int len) throws IOException { out.write(b, off, len); count += len; }
+        long getCount() { return count; }
     }
 }

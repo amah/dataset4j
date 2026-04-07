@@ -94,88 +94,69 @@ class ParquetSimpleTest {
 
     @Test
     void shouldSupportLZ4Compression() throws IOException {
-        // Given
         Path parquetFile = tempDir.resolve("test_lz4.parquet");
-        Dataset<SimpleEmployee> data = Dataset.of(
-            new SimpleEmployee(1, "Alice Brown", "alice@company.com", true, 
-                new BigDecimal("90000.25"), LocalDate.of(1988, 7, 3))
-        );
+        SimpleEmployee original = new SimpleEmployee(1, "Alice Brown", "alice@company.com", true,
+                new BigDecimal("90000.25"), LocalDate.of(1988, 7, 3));
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.LZ4)
+                .write(Dataset.of(original));
 
-        // When - Write with LZ4 compression
-        ParquetDatasetWriter
-            .toFile(parquetFile.toString())
-            .withCompression(ParquetCompressionCodec.LZ4)
-            .write(data);
-
-        // Then - Should create file
-        assertTrue(parquetFile.toFile().exists());
-        System.out.println("Parquet file (LZ4) created: " + parquetFile + 
-            " (size: " + parquetFile.toFile().length() + " bytes)");
+        Dataset<SimpleEmployee> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(SimpleEmployee.class);
+        assertEquals(1, readBack.size());
+        assertEquals(original, readBack.first().orElseThrow());
     }
 
     @Test
     void shouldSupportGZIPCompression() throws IOException {
-        // Given
         Path parquetFile = tempDir.resolve("test_gzip.parquet");
-        Dataset<SimpleEmployee> data = Dataset.of(
-            new SimpleEmployee(1, "Charlie Davis", "charlie@company.com", true, 
-                new BigDecimal("95000.00"), LocalDate.of(1991, 12, 25))
-        );
+        SimpleEmployee original = new SimpleEmployee(1, "Charlie Davis", "charlie@company.com", true,
+                new BigDecimal("95000.00"), LocalDate.of(1991, 12, 25));
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.GZIP)
+                .write(Dataset.of(original));
 
-        // When - Write with GZIP compression
-        ParquetDatasetWriter
-            .toFile(parquetFile.toString())
-            .withCompression(ParquetCompressionCodec.GZIP)
-            .write(data);
-
-        // Then - Should create file
-        assertTrue(parquetFile.toFile().exists());
-        System.out.println("Parquet file (GZIP) created: " + parquetFile + 
-            " (size: " + parquetFile.toFile().length() + " bytes)");
+        Dataset<SimpleEmployee> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(SimpleEmployee.class);
+        assertEquals(1, readBack.size());
+        assertEquals(original, readBack.first().orElseThrow());
     }
 
     @Test
     void shouldSupportUncompressedFormat() throws IOException {
-        // Given
         Path parquetFile = tempDir.resolve("test_uncompressed.parquet");
-        Dataset<SimpleEmployee> data = Dataset.of(
-            new SimpleEmployee(1, "Diana Evans", "diana@company.com", false, 
-                new BigDecimal("87500.50"), LocalDate.of(1987, 4, 14))
-        );
+        SimpleEmployee original = new SimpleEmployee(1, "Diana Evans", "diana@company.com", false,
+                new BigDecimal("87500.50"), LocalDate.of(1987, 4, 14));
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.UNCOMPRESSED)
+                .write(Dataset.of(original));
 
-        // When - Write uncompressed
-        ParquetDatasetWriter
-            .toFile(parquetFile.toString())
-            .withCompression(ParquetCompressionCodec.UNCOMPRESSED)
-            .write(data);
-
-        // Then - Should create file
-        assertTrue(parquetFile.toFile().exists());
-        System.out.println("Parquet file (UNCOMPRESSED) created: " + parquetFile + 
-            " (size: " + parquetFile.toFile().length() + " bytes)");
+        Dataset<SimpleEmployee> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(SimpleEmployee.class);
+        assertEquals(1, readBack.size());
+        assertEquals(original, readBack.first().orElseThrow());
     }
 
     @Test
     void shouldHandleNullValues() throws IOException {
-        // Given
         Path parquetFile = tempDir.resolve("null_values.parquet");
-        Dataset<SimpleEmployee> dataWithNulls = Dataset.of(
-            new SimpleEmployee(1, "John", null, null, null, null),
-            new SimpleEmployee(2, "Jane", "jane@company.com", true, 
-                new BigDecimal("50000"), LocalDate.now())
-        );
+        SimpleEmployee withNulls = new SimpleEmployee(1, "John", null, null, null, null);
+        SimpleEmployee complete = new SimpleEmployee(2, "Jane", "jane@company.com", true,
+                new BigDecimal("50000"), LocalDate.of(2024, 1, 15));
 
-        // When - Write and read
-        ParquetDatasetWriter
-            .toFile(parquetFile.toString())
-            .withCompression(ParquetCompressionCodec.SNAPPY)
-            .write(dataWithNulls);
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.SNAPPY)
+                .write(Dataset.of(withNulls, complete));
 
-        System.out.println("Parquet file with nulls created: " + parquetFile + 
-            " (size: " + parquetFile.toFile().length() + " bytes)");
-
-        // Then - Should create file (reading may depend on implementation)
-        assertTrue(parquetFile.toFile().exists());
+        Dataset<SimpleEmployee> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(SimpleEmployee.class);
+        assertEquals(2, readBack.size());
+        assertEquals(withNulls, readBack.toList().get(0));
+        assertEquals(complete, readBack.toList().get(1));
     }
 
     @Test
@@ -201,29 +182,24 @@ class ParquetSimpleTest {
 
     @Test
     void shouldHandleSpecialCharacters() throws IOException {
-        // Given
         Path parquetFile = tempDir.resolve("special_chars.parquet");
-        Dataset<SimpleEmployee> data = Dataset.of(
-            new SimpleEmployee(
-                1, 
-                "José María González-Pérez", 
-                "josé.maría@château.com", 
-                true, 
-                new BigDecimal("95500.50"), 
-                LocalDate.of(1990, 5, 15)
-            )
-        );
+        SimpleEmployee original = new SimpleEmployee(
+                1,
+                "José María González-Pérez",
+                "josé.maría@château.com",
+                true,
+                new BigDecimal("95500.50"),
+                LocalDate.of(1990, 5, 15));
 
-        // When - Write special characters
-        ParquetDatasetWriter
-            .toFile(parquetFile.toString())
-            .withCompression(ParquetCompressionCodec.SNAPPY)
-            .write(data);
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.SNAPPY)
+                .write(Dataset.of(original));
 
-        // Then - Should handle UTF-8 correctly
-        assertTrue(parquetFile.toFile().exists());
-        System.out.println("Parquet file with special characters created: " + parquetFile + 
-            " (size: " + parquetFile.toFile().length() + " bytes)");
+        Dataset<SimpleEmployee> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(SimpleEmployee.class);
+        assertEquals(1, readBack.size());
+        assertEquals(original, readBack.first().orElseThrow());
     }
 
     @Test
@@ -255,11 +231,13 @@ class ParquetSimpleTest {
         // Then - Should handle efficiently
         assertTrue(writeTime < 5000, "Write should complete within 5 seconds");
         assertTrue(parquetFile.toFile().exists());
-        
-        System.out.println("Large Parquet dataset created in " + writeTime + "ms: " + parquetFile);
-        System.out.println("File size: " + parquetFile.toFile().length() + " bytes");
-        System.out.println("Compression ratio: " + 
-            String.format("%.2f%%", (1.0 - (double)parquetFile.toFile().length() / (records.size() * 100)) * 100));
+
+        Dataset<SimpleEmployee> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(SimpleEmployee.class);
+        assertEquals(100, readBack.size());
+        assertEquals(records.get(0), readBack.toList().get(0));
+        assertEquals(records.get(99), readBack.toList().get(99));
     }
 
     @Test
@@ -346,6 +324,34 @@ class ParquetSimpleTest {
         // Then
         assertTrue(parquetFile.toFile().exists());
         assertTrue(parquetFile.toFile().length() > 0);
+    }
+
+    @Test
+    void shouldRoundTripBigDecimalAsLogicalDecimal() throws IOException {
+        Path parquetFile = tempDir.resolve("decimal_logical.parquet");
+        Dataset<SimpleEmployee> data = Dataset.of(
+            new SimpleEmployee(1, "Alice", "a@x.com", true,
+                new BigDecimal("12345.67"), LocalDate.of(1990, 1, 1)),
+            new SimpleEmployee(2, "Bob", "b@x.com", false,
+                new BigDecimal("9876543.210"), LocalDate.of(1985, 6, 20)),
+            new SimpleEmployee(3, "Carol", "c@x.com", true,
+                new BigDecimal("0.5"), LocalDate.of(2001, 12, 31))
+        );
+
+        ParquetDatasetWriter.toFile(parquetFile.toString())
+                .withCompression(ParquetCompressionCodec.SNAPPY)
+                .withBigDecimalAsLogicalType(true)
+                .write(data);
+
+        Dataset<SimpleEmployee> readBack = ParquetDatasetReader
+                .fromFile(parquetFile.toString())
+                .readAs(SimpleEmployee.class);
+        assertEquals(3, readBack.size());
+        // All values are rescaled to the max scale (3) on write — comparison via compareTo
+        // since BigDecimal.equals is scale-sensitive.
+        assertEquals(0, new BigDecimal("12345.67").compareTo(readBack.toList().get(0).salary()));
+        assertEquals(0, new BigDecimal("9876543.210").compareTo(readBack.toList().get(1).salary()));
+        assertEquals(0, new BigDecimal("0.5").compareTo(readBack.toList().get(2).salary()));
     }
 
     @Test
