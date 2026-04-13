@@ -1,7 +1,10 @@
 package dataset4j.parquet;
 
+import dataset4j.CellValue;
 import dataset4j.Dataset;
 import dataset4j.DatasetReadException;
+import dataset4j.Table;
+import dataset4j.ValueType;
 import dataset4j.annotations.AnnotationProcessor;
 import dataset4j.annotations.ColumnMetadata;
 import dataset4j.annotations.FormatProvider;
@@ -227,6 +230,122 @@ public class ParquetDatasetReader {
             }
             return Dataset.of(result);
         }
+    }
+
+    /**
+     * Read the Parquet file into an untyped {@link Table}, preserving type information
+     * from the Parquet schema.
+     *
+     * @return a Table with CellValues derived from Parquet physical/logical types
+     * @throws IOException if the file cannot be read
+     */
+    public Table readTable() throws IOException {
+        long fileSize = Files.size(filePath);
+        if (fileSize > maxFileSize) {
+            throw new IOException("File too large: " + fileSize + " bytes (max " + maxFileSize + " bytes). "
+                    + "Use maxFileSize() to increase the limit.");
+        }
+
+        try (RandomAccessFile raf = new RandomAccessFile(filePath.toFile(), "r");
+             FileChannel ch = raf.getChannel()) {
+
+            FileMetaData fmd = readFooter(ch);
+
+            // Build ordered list of column names and schema elements
+            List<String> columnNames = new ArrayList<>();
+            Map<String, SchemaElement> schemaByName = new LinkedHashMap<>();
+            for (SchemaElement se : fmd.getSchema()) {
+                if (se.isSetType()) {
+                    columnNames.add(se.getName());
+                    schemaByName.put(se.getName(), se);
+                }
+            }
+
+            if (columnNames.isEmpty()) {
+                return Table.empty();
+            }
+
+            List<Map<String, CellValue>> allRows = new ArrayList<>();
+
+            for (RowGroup rg : fmd.getRow_groups()) {
+                int numRows = (int) rg.getNum_rows();
+
+                // Decode each column chunk
+                Map<String, Object[]> columnData = new LinkedHashMap<>();
+                Map<String, SchemaElement> columnSchemas = new LinkedHashMap<>();
+                for (ColumnChunk cc : rg.getColumns()) {
+                    ColumnMetaData cmd = cc.getMeta_data();
+                    String colName = cmd.getPath_in_schema().get(0);
+                    SchemaElement se = schemaByName.get(colName);
+                    if (se == null) continue;
+                    columnData.put(colName, readColumnChunk(ch, cmd, se, numRows));
+                    columnSchemas.put(colName, se);
+                }
+
+                // Build rows
+                for (int row = 0; row < numRows; row++) {
+                    Map<String, CellValue> rowMap = new LinkedHashMap<>();
+                    for (String colName : columnNames) {
+                        Object[] data = columnData.get(colName);
+                        Object raw = (data != null && row < data.length) ? data[row] : null;
+                        SchemaElement se = columnSchemas.get(colName);
+                        rowMap.put(colName, toCellValue(raw, se));
+                    }
+                    allRows.add(rowMap);
+                }
+            }
+
+            return Table.of(columnNames, allRows);
+        }
+    }
+
+    /**
+     * Convert a raw decoded Parquet value + schema element into a CellValue
+     * with the appropriate ValueType.
+     */
+    private static CellValue toCellValue(Object raw, SchemaElement se) {
+        if (raw == null) {
+            return CellValue.blank();
+        }
+
+        if (se == null) {
+            // No schema info — infer from value
+            return Table.wrapValue(raw);
+        }
+
+        // Determine ValueType from Parquet schema
+        Type physicalType = se.getType();
+
+        if (raw instanceof Boolean) {
+            return CellValue.of(raw, ValueType.BOOLEAN);
+        }
+
+        if (raw instanceof LocalDate) {
+            return CellValue.of(raw, ValueType.DATE);
+        }
+
+        if (raw instanceof LocalDateTime) {
+            return CellValue.of(raw, ValueType.DATETIME);
+        }
+
+        if (raw instanceof BigDecimal) {
+            String format = null;
+            if (se.isSetScale() && se.isSetPrecision()) {
+                format = "DECIMAL(" + se.getPrecision() + "," + se.getScale() + ")";
+            }
+            return CellValue.of(raw, ValueType.NUMBER, format);
+        }
+
+        if (raw instanceof Number) {
+            return CellValue.of(raw, ValueType.NUMBER);
+        }
+
+        if (raw instanceof String) {
+            return CellValue.of(raw, ValueType.STRING);
+        }
+
+        // Fallback
+        return CellValue.of(raw, ValueType.STRING);
     }
 
     // ---------- Footer ----------

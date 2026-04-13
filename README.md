@@ -99,7 +99,7 @@ ParquetDatasetWriter
 ### 📊 **Format Support**
 - **Excel**: Read/write with Apache POI integration
 - **Parquet**: Lightweight implementation (96% size reduction vs Hadoop)
-- **CSV**: Coming soon
+- **CSV**: Read/write with OpenCSV integration
 - **JSON**: Planned
 
 ### 🏗️ **Modular Architecture**
@@ -115,6 +115,8 @@ ParquetDatasetWriter
 
 ## 📖 **Documentation**
 
+- **[Table (Untyped Data)](docs/TABLE.md)** - Schema-free tabular data with source type preservation
+- **[CellValue Coercion](docs/CELLVALUE_COERCION.md)** - Type coercion rules for untyped data
 - **[Core Concepts](docs/ai-instructions/dataset4j-ai-instructions-core-concepts.md)** - Understanding Dataset4J fundamentals
 - **[Usage Patterns](docs/ai-instructions/dataset4j-ai-instructions-usage-patterns.md)** - Common operations and examples
 - **[Pandas Migration](docs/ai-instructions/dataset4j-ai-instructions-pandas-mapping.md)** - Complete pandas to Dataset4J mapping
@@ -138,6 +140,37 @@ var ds = Dataset.of(
 ds.filter(e -> e.age() > 25)
   .sortBy(Employee::name)
   .map(Employee::name);       // Dataset<String>
+```
+
+### Table — Untyped Tabular Data
+
+Schema-free sibling of `Dataset<T>`. Load files without defining a record class, inspect and reshape data dynamically, then convert to a typed Dataset when ready. Each cell preserves its source type and format metadata via `CellValue`. See **[full documentation](docs/TABLE.md)**.
+
+```java
+// Read any file without a record class
+Table table = ExcelDatasetReader.fromFile("data.xlsx").readTable();
+Table csv   = CsvDatasetReader.fromFile("data.csv").readTable();
+
+// Inspect, filter, reshape
+table.columns();                    // ["name", "age", "dept"]
+table.cellValue(0, "age").type();   // ValueType.NUMBER
+table.cellValue(0, "age").format(); // "$#,##0" (from Excel)
+
+Table result = table
+    .filter(row -> row.get("dept").asString().equals("Eng"))
+    .select("name", "age")
+    .sortBy("age");
+
+// Melt (unpivot) and explode
+table.melt(List.of("name"), List.of("Q1","Q2","Q3"), "quarter", "score");
+table.explode("tags", cv -> Arrays.stream(cv.asString().split(","))
+        .map(CellValue::ofString).collect(Collectors.toList()));
+
+// Convert to typed Dataset
+Dataset<Employee> ds = result.toDataset(Employee.class);
+
+// Or write directly to another format
+ParquetDatasetWriter.toFile("output.parquet").writeTable(table);
 ```
 
 ### Pair\<L, R\> — Join Result

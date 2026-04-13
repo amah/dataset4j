@@ -82,23 +82,23 @@ public final class DatasetIO {
      * CSV I/O operations.
      */
     public static class CsvIO {
-        
+
         /**
-         * Create CSV reader.
+         * Create CSV reader for reading into an untyped {@link Table}.
          * @param filePath path to CSV file
-         * @return CSV reader (placeholder)
+         * @return CSV reader
          */
-        public Object fromFile(String filePath) {
-            throw new UnsupportedOperationException("CSV reader not yet implemented");
+        public dataset4j.poi.CsvDatasetReader fromFile(String filePath) {
+            return dataset4j.poi.CsvDatasetReader.fromFile(filePath);
         }
-        
+
         /**
          * Create CSV writer.
          * @param filePath path to output CSV file
-         * @return CSV writer (placeholder)
+         * @return CSV writer
          */
-        public Object toFile(String filePath) {
-            throw new UnsupportedOperationException("CSV writer not yet implemented");
+        public dataset4j.poi.CsvDatasetWriter toFile(String filePath) {
+            return dataset4j.poi.CsvDatasetWriter.toFile(filePath);
         }
     }
     

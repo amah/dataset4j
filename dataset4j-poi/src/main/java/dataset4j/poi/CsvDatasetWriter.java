@@ -1,7 +1,9 @@
 package dataset4j.poi;
 
 import com.opencsv.CSVWriter;
+import dataset4j.CellValue;
 import dataset4j.Dataset;
+import dataset4j.Table;
 import dataset4j.annotations.*;
 
 import java.io.FileWriter;
@@ -10,6 +12,7 @@ import java.lang.reflect.RecordComponent;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -289,6 +292,35 @@ public class CsvDatasetWriter {
                     }
                 }
                 writer.writeNext(row);
+            }
+        }
+    }
+
+    /**
+     * Write an untyped {@link Table} to CSV.
+     *
+     * @param table the table to write
+     * @throws IOException if file cannot be written
+     */
+    public void writeTable(Table table) throws IOException {
+        try (CSVWriter writer = new CSVWriter(new FileWriter(filePath), separator, quoteChar, escapeChar, lineEnd)) {
+            List<String> columns = table.columns();
+
+            if (includeHeaders) {
+                writer.writeNext(columns.toArray(new String[0]));
+            }
+
+            for (Map<String, CellValue> row : table.toList()) {
+                String[] line = new String[columns.size()];
+                for (int i = 0; i < columns.size(); i++) {
+                    CellValue cv = row.get(columns.get(i));
+                    if (cv == null || cv.isBlank()) {
+                        line[i] = "";
+                    } else {
+                        line[i] = cv.asString();
+                    }
+                }
+                writer.writeNext(line);
             }
         }
     }

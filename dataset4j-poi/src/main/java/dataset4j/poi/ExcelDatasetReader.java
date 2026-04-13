@@ -1,7 +1,10 @@
 package dataset4j.poi;
 
+import dataset4j.CellValue;
 import dataset4j.Dataset;
 import dataset4j.DatasetReadException;
+import dataset4j.Table;
+import dataset4j.ValueType;
 import dataset4j.annotations.AnnotationProcessor;
 import dataset4j.annotations.ColumnMetadata;
 import org.apache.poi.ss.usermodel.*;
@@ -185,6 +188,126 @@ public class ExcelDatasetReader {
         }
     }
 
+    /**
+     * Read Excel data into an untyped {@link Table}, preserving cell types and format strings.
+     *
+     * <p>Column names are derived from the header row (if {@code hasHeaders} is true)
+     * or generated as "Column1", "Column2", etc.
+     *
+     * @return a Table with CellValues preserving source type and format info
+     * @throws IOException if the file cannot be read
+     */
+    public Table readTable() throws IOException {
+        try (FileInputStream fis = new FileInputStream(new File(filePath));
+             Workbook workbook = new XSSFWorkbook(fis)) {
+
+            Sheet sheet = sheetName != null ? workbook.getSheet(sheetName) : workbook.getSheetAt(0);
+            if (sheet == null) {
+                throw new IllegalArgumentException("Sheet not found: " + sheetName);
+            }
+
+            // Determine column names from header row or generate them
+            List<String> columnNames;
+            int dataStartRow;
+
+            if (hasHeaders) {
+                Row headerRow = sheet.getRow(startRow);
+                if (headerRow == null) {
+                    return Table.empty();
+                }
+                columnNames = new ArrayList<>();
+                for (int i = headerRow.getFirstCellNum(); i < headerRow.getLastCellNum(); i++) {
+                    Cell cell = headerRow.getCell(i);
+                    String name = (cell != null) ? getCellValueAsString(cell, String.class).trim() : "";
+                    columnNames.add(name.isEmpty() ? "Column" + (i + 1) : name);
+                }
+                dataStartRow = startRow + 1;
+            } else {
+                // Scan first data row to determine column count
+                Row firstRow = sheet.getRow(startRow);
+                if (firstRow == null) {
+                    return Table.empty();
+                }
+                int colCount = firstRow.getLastCellNum() - firstRow.getFirstCellNum();
+                columnNames = new ArrayList<>();
+                for (int i = 0; i < colCount; i++) {
+                    columnNames.add("Column" + (i + 1));
+                }
+                dataStartRow = startRow;
+            }
+
+            List<Map<String, CellValue>> rows = new ArrayList<>();
+            int firstCellNum = hasHeaders ? sheet.getRow(startRow).getFirstCellNum() : sheet.getRow(startRow).getFirstCellNum();
+
+            for (int rowIndex = dataStartRow; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
+                Row row = sheet.getRow(rowIndex);
+                if (row == null || isRowEmpty(row)) {
+                    continue;
+                }
+
+                Map<String, CellValue> rowMap = new LinkedHashMap<>();
+                for (int c = 0; c < columnNames.size(); c++) {
+                    int cellIndex = firstCellNum + c;
+                    Cell cell = row.getCell(cellIndex);
+                    rowMap.put(columnNames.get(c), extractCellValue(cell));
+                }
+                rows.add(rowMap);
+            }
+
+            return Table.of(columnNames, rows);
+        }
+    }
+
+    /**
+     * Extract a CellValue from an Excel cell, preserving the cell type and format string.
+     */
+    private CellValue extractCellValue(Cell cell) {
+        if (cell == null) {
+            return CellValue.blank();
+        }
+
+        String formatString = null;
+        CellStyle style = cell.getCellStyle();
+        if (style != null) {
+            String fmt = style.getDataFormatString();
+            if (fmt != null && !"General".equals(fmt)) {
+                formatString = fmt;
+            }
+        }
+
+        return switch (cell.getCellType()) {
+            case STRING -> CellValue.of(cell.getStringCellValue(), ValueType.STRING, formatString);
+            case NUMERIC -> {
+                if (DateUtil.isCellDateFormatted(cell)) {
+                    LocalDateTime ldt = cell.getLocalDateTimeCellValue();
+                    // If time component is midnight, treat as DATE; otherwise DATETIME
+                    if (ldt.getHour() == 0 && ldt.getMinute() == 0 && ldt.getSecond() == 0 && ldt.getNano() == 0) {
+                        yield CellValue.of(ldt.toLocalDate(), ValueType.DATE, formatString);
+                    } else {
+                        yield CellValue.of(ldt, ValueType.DATETIME, formatString);
+                    }
+                } else {
+                    double numValue = cell.getNumericCellValue();
+                    // Store as integer if it's a whole number
+                    if (numValue == (long) numValue && !Double.isInfinite(numValue)) {
+                        yield CellValue.of((long) numValue, ValueType.NUMBER, formatString);
+                    } else {
+                        yield CellValue.of(numValue, ValueType.NUMBER, formatString);
+                    }
+                }
+            }
+            case BOOLEAN -> CellValue.of(cell.getBooleanCellValue(), ValueType.BOOLEAN, formatString);
+            case FORMULA -> {
+                // Store the formula expression; also try to evaluate
+                String formula = cell.getCellFormula();
+                yield CellValue.of(formula, ValueType.FORMULA, formatString);
+            }
+            case ERROR -> CellValue.error(String.valueOf(cell.getErrorCellValue()));
+            case BLANK -> CellValue.blank();
+            default -> CellValue.blank();
+        };
+    }
+
     private Map<String, Integer> buildHeaderIndex(Sheet sheet) {
         Map<String, Integer> index = new LinkedHashMap<>();
         if (!hasHeaders) {
@@ -354,7 +477,7 @@ public class ExcelDatasetReader {
             case FORMULA -> {
                 try {
                     FormulaEvaluator evaluator = cell.getSheet().getWorkbook().getCreationHelper().createFormulaEvaluator();
-                    CellValue cellValue = evaluator.evaluate(cell);
+                    org.apache.poi.ss.usermodel.CellValue cellValue = evaluator.evaluate(cell);
                     yield switch (cellValue.getCellType()) {
                         case NUMERIC -> String.valueOf(cellValue.getNumberValue());
                         case STRING -> cellValue.getStringValue();

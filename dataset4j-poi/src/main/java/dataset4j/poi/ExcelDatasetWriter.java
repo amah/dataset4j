@@ -1,9 +1,12 @@
 package dataset4j.poi;
 
+import dataset4j.CellValue;
 import dataset4j.Dataset;
+import dataset4j.Table;
+import dataset4j.ValueType;
 import dataset4j.annotations.*;
 import dataset4j.annotations.DataColumn;
-import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import java.io.FileOutputStream;
@@ -300,6 +303,121 @@ public class ExcelDatasetWriter {
             }
 
             workbook.write(fos);
+        }
+    }
+
+    /**
+     * Write an untyped {@link Table} to Excel, preserving cell types and format strings.
+     *
+     * @param table the table to write
+     * @throws IOException if file cannot be written
+     */
+    public void writeTable(Table table) throws IOException {
+        try (Workbook workbook = new XSSFWorkbook();
+             FileOutputStream fos = new FileOutputStream(filePath)) {
+
+            Sheet sheet = workbook.createSheet(sheetName);
+
+            if (table.isEmpty()) {
+                workbook.write(fos);
+                return;
+            }
+
+            CellStyle headerStyle = ExcelSheetRenderer.createHeaderStyle(workbook);
+            DataFormat dataFormat = workbook.createDataFormat();
+
+            int rowIndex = 0;
+
+            // Write headers
+            if (includeHeaders) {
+                Row headerRow = sheet.createRow(rowIndex++);
+                List<String> columns = table.columns();
+                for (int c = 0; c < columns.size(); c++) {
+                    Cell cell = headerRow.createCell(c);
+                    cell.setCellValue(columns.get(c));
+                    cell.setCellStyle(headerStyle);
+                }
+            }
+
+            // Write data rows
+            for (Map<String, CellValue> row : table.toList()) {
+                Row dataRow = sheet.createRow(rowIndex++);
+                List<String> columns = table.columns();
+                for (int c = 0; c < columns.size(); c++) {
+                    Cell cell = dataRow.createCell(c);
+                    CellValue cv = row.get(columns.get(c));
+                    writeTableCell(cell, cv, workbook, dataFormat);
+                }
+            }
+
+            // Auto-size columns
+            if (autoSizeColumns) {
+                for (int i = 0; i < table.columnCount(); i++) {
+                    sheet.autoSizeColumn(i);
+                }
+            }
+
+            workbook.write(fos);
+        }
+    }
+
+    private void writeTableCell(Cell cell, CellValue cv, Workbook workbook, DataFormat dataFormat) {
+        if (cv == null || cv.isBlank()) {
+            cell.setBlank();
+            return;
+        }
+
+        Object value = cv.value();
+        ValueType type = cv.type();
+
+        // Apply format string if present
+        if (cv.hasFormat()) {
+            CellStyle style = workbook.createCellStyle();
+            style.setDataFormat(dataFormat.getFormat(cv.format()));
+            cell.setCellStyle(style);
+        }
+
+        switch (type) {
+            case STRING -> cell.setCellValue(value != null ? value.toString() : "");
+            case NUMBER -> {
+                if (value instanceof Number n) {
+                    cell.setCellValue(n.doubleValue());
+                } else if (value != null) {
+                    try {
+                        cell.setCellValue(Double.parseDouble(value.toString()));
+                    } catch (NumberFormatException e) {
+                        cell.setCellValue(value.toString());
+                    }
+                }
+            }
+            case BOOLEAN -> {
+                if (value instanceof Boolean b) {
+                    cell.setCellValue(b);
+                } else if (value != null) {
+                    cell.setCellValue(Boolean.parseBoolean(value.toString()));
+                }
+            }
+            case DATE -> {
+                if (value instanceof java.time.LocalDate ld) {
+                    cell.setCellValue(java.sql.Date.valueOf(ld));
+                } else if (value != null) {
+                    cell.setCellValue(value.toString());
+                }
+            }
+            case DATETIME -> {
+                if (value instanceof java.time.LocalDateTime ldt) {
+                    cell.setCellValue(java.sql.Timestamp.valueOf(ldt));
+                } else if (value != null) {
+                    cell.setCellValue(value.toString());
+                }
+            }
+            case FORMULA -> {
+                if (value != null) {
+                    cell.setCellFormula(value.toString());
+                }
+            }
+            case ERROR -> cell.setCellValue(value != null ? value.toString() : "#ERROR");
+            default -> cell.setBlank();
         }
     }
 

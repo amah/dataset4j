@@ -80,6 +80,46 @@ public class Dataset<T> implements Iterable<T> {
         return this;
     }
 
+    /**
+     * Convert this typed Dataset to an untyped {@link Table}.
+     *
+     * <p>Record components become columns; values are auto-wrapped into
+     * {@link CellValue} instances preserving their Java type as the
+     * corresponding {@link ValueType}.
+     *
+     * @return a Table representation of this dataset
+     */
+    public Table toTable() {
+        if (rows.isEmpty()) return Table.empty();
+
+        T sample = rows.get(0);
+        if (!sample.getClass().isRecord()) {
+            throw new IllegalStateException("toTable() requires a record-based Dataset");
+        }
+
+        RecordComponent[] components = sample.getClass().getRecordComponents();
+        java.util.List<String> columnNames = new java.util.ArrayList<>(components.length);
+        for (RecordComponent c : components) {
+            columnNames.add(c.getName());
+        }
+
+        java.util.List<java.util.Map<String, CellValue>> tableRows = new java.util.ArrayList<>(rows.size());
+        for (T record : rows) {
+            java.util.Map<String, CellValue> row = new java.util.LinkedHashMap<>();
+            for (RecordComponent c : components) {
+                try {
+                    Object value = c.getAccessor().invoke(record);
+                    row.put(c.getName(), Table.wrapValue(value));
+                } catch (ReflectiveOperationException e) {
+                    row.put(c.getName(), CellValue.blank());
+                }
+            }
+            tableRows.add(row);
+        }
+
+        return Table.of(columnNames, tableRows);
+    }
+
     // ---------------------------------------------------------------
     // Basic properties
     // ---------------------------------------------------------------

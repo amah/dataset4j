@@ -205,7 +205,7 @@ final class ExcelSheetRenderer {
         }
     }
 
-    private static CellStyle createHeaderStyle(Workbook workbook) {
+    static CellStyle createHeaderStyle(Workbook workbook) {
         CellStyle style = workbook.createCellStyle();
         Font font = workbook.createFont();
         font.setBold(true);

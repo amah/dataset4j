@@ -1,6 +1,9 @@
 package dataset4j.parquet;
 
+import dataset4j.CellValue;
 import dataset4j.Dataset;
+import dataset4j.Table;
+import dataset4j.ValueType;
 import dataset4j.annotations.*;
 import org.apache.parquet.format.*;
 
@@ -219,6 +222,269 @@ public class ParquetDatasetWriter {
             out.write(intToLeBytes(footerLength));
             out.write(ParquetIo.MAGIC);
         }
+    }
+
+    /**
+     * Write an untyped {@link Table} to a Parquet file.
+     *
+     * <p>Parquet column types are inferred from the {@link ValueType} of the first non-blank
+     * value in each column.
+     *
+     * @param table the table to write
+     * @throws IOException if the file cannot be written
+     */
+    public void writeTable(Table table) throws IOException {
+        if (table.isEmpty()) {
+            throw new IllegalArgumentException("Cannot write empty table");
+        }
+
+        List<String> columns = table.columns();
+        List<Map<String, CellValue>> rows = table.toList();
+
+        // Infer Parquet types from the first non-blank value in each column
+        List<TableLeafColumn> tableLeaves = new ArrayList<>();
+        for (String colName : columns) {
+            TableLeafColumn lc = new TableLeafColumn();
+            lc.name = colName;
+            lc.physicalType = Type.BYTE_ARRAY; // default fallback: string
+            lc.logicalType = LogicalType.STRING(new StringType());
+            lc.convertedType = ConvertedType.UTF8;
+
+            // Find first non-blank value to infer type
+            for (Map<String, CellValue> row : rows) {
+                CellValue cv = row.get(colName);
+                if (cv != null && !cv.isBlank()) {
+                    ValueType vt = cv.type();
+                    Object val = cv.value();
+                    switch (vt) {
+                        case BOOLEAN -> {
+                            lc.physicalType = Type.BOOLEAN;
+                            lc.logicalType = null;
+                            lc.convertedType = null;
+                        }
+                        case NUMBER -> {
+                            if (val instanceof Integer) {
+                                lc.physicalType = Type.INT32;
+                                lc.logicalType = null;
+                                lc.convertedType = null;
+                            } else if (val instanceof Long) {
+                                lc.physicalType = Type.INT64;
+                                lc.logicalType = null;
+                                lc.convertedType = null;
+                            } else if (val instanceof Float) {
+                                lc.physicalType = Type.FLOAT;
+                                lc.logicalType = null;
+                                lc.convertedType = null;
+                            } else if (val instanceof Double) {
+                                lc.physicalType = Type.DOUBLE;
+                                lc.logicalType = null;
+                                lc.convertedType = null;
+                            } else if (val instanceof BigDecimal) {
+                                // Store BigDecimal as string by default
+                                lc.physicalType = Type.BYTE_ARRAY;
+                                lc.logicalType = LogicalType.STRING(new StringType());
+                                lc.convertedType = ConvertedType.UTF8;
+                            } else {
+                                // Generic number → double
+                                lc.physicalType = Type.DOUBLE;
+                                lc.logicalType = null;
+                                lc.convertedType = null;
+                            }
+                        }
+                        case DATE -> {
+                            lc.physicalType = Type.INT32;
+                            lc.logicalType = LogicalType.DATE(new DateType());
+                            lc.convertedType = ConvertedType.DATE;
+                        }
+                        case DATETIME, TIME -> {
+                            // Store as ISO string
+                            lc.physicalType = Type.BYTE_ARRAY;
+                            lc.logicalType = LogicalType.STRING(new StringType());
+                            lc.convertedType = ConvertedType.UTF8;
+                        }
+                        default -> {
+                            // STRING, FORMULA, ERROR → string
+                        }
+                    }
+                    break;
+                }
+            }
+            tableLeaves.add(lc);
+        }
+
+        try (FileOutputStream fos = new FileOutputStream(filePath.toFile());
+             CountingOutputStream out = new CountingOutputStream(fos)) {
+
+            out.write(ParquetIo.MAGIC);
+
+            List<RowGroup> rowGroups = new ArrayList<>();
+            for (int start = 0; start < rows.size(); start += rowGroupSize) {
+                int end = Math.min(start + rowGroupSize, rows.size());
+                List<Map<String, CellValue>> chunk = rows.subList(start, end);
+                rowGroups.add(writeTableRowGroup(out, chunk, tableLeaves));
+            }
+
+            List<SchemaElement> schema = buildTableSchemaElements(tableLeaves);
+
+            FileMetaData fmd = new FileMetaData(1, schema, rows.size(), rowGroups);
+            fmd.setCreated_by("dataset4j-parquet");
+            if (!keyValueMetadata.isEmpty()) {
+                List<KeyValue> kvs = new ArrayList<>();
+                for (Map.Entry<String, String> e : keyValueMetadata.entrySet()) {
+                    KeyValue kv = new KeyValue(e.getKey());
+                    kv.setValue(e.getValue());
+                    kvs.add(kv);
+                }
+                fmd.setKey_value_metadata(kvs);
+            }
+
+            long footerStart = out.getCount();
+            Util.writeFileMetaData(fmd, out);
+            int footerLength = (int) (out.getCount() - footerStart);
+            out.write(intToLeBytes(footerLength));
+            out.write(ParquetIo.MAGIC);
+        }
+    }
+
+    private RowGroup writeTableRowGroup(CountingOutputStream out,
+                                        List<Map<String, CellValue>> rows,
+                                        List<TableLeafColumn> leaves) throws IOException {
+        long rgStart = out.getCount();
+        List<ColumnChunk> chunks = new ArrayList<>();
+        long totalUncompressed = 0;
+        long totalCompressed = 0;
+
+        for (TableLeafColumn leaf : leaves) {
+            ColumnChunkResult ccr = writeTableColumnChunk(out, rows, leaf);
+            chunks.add(ccr.chunk);
+            totalUncompressed += ccr.uncompressed;
+            totalCompressed += ccr.compressed;
+        }
+
+        RowGroup rg = new RowGroup(chunks, totalUncompressed, rows.size());
+        rg.setFile_offset(rgStart);
+        rg.setTotal_compressed_size(totalCompressed);
+        return rg;
+    }
+
+    private ColumnChunkResult writeTableColumnChunk(CountingOutputStream out,
+                                                     List<Map<String, CellValue>> rows,
+                                                     TableLeafColumn leaf) throws IOException {
+        List<Object> values = new ArrayList<>(rows.size());
+        int nonNull = 0;
+        for (Map<String, CellValue> row : rows) {
+            CellValue cv = row.get(leaf.name);
+            Object v = (cv != null && !cv.isBlank()) ? coerceForParquet(cv, leaf) : null;
+            values.add(v);
+            if (v != null) nonNull++;
+        }
+
+        // All table columns are optional (we don't know required/optional from Table)
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        int[] levels = new int[values.size()];
+        for (int i = 0; i < values.size(); i++) levels[i] = values.get(i) == null ? 0 : 1;
+        payload.write(ParquetIo.encodeDefLevels(levels));
+
+        // Build a temporary LeafColumn for encodePlainValues
+        LeafColumn tempLeaf = new LeafColumn();
+        tempLeaf.name = leaf.name;
+        tempLeaf.physicalType = leaf.physicalType;
+        tempLeaf.decimalScale = -1;
+
+        byte[] plainValues = encodePlainValues(values, tempLeaf, nonNull);
+        payload.write(plainValues);
+
+        byte[] uncompressed = payload.toByteArray();
+        byte[] compressed = ParquetIo.compress(uncompressed, compressionCodec);
+
+        PageHeader pageHeader = new PageHeader(PageType.DATA_PAGE, uncompressed.length, compressed.length);
+        DataPageHeader dph = new DataPageHeader(values.size(),
+                Encoding.PLAIN, Encoding.RLE, Encoding.RLE);
+        pageHeader.setData_page_header(dph);
+
+        long chunkStart = out.getCount();
+        Util.writePageHeader(pageHeader, out);
+        out.write(compressed);
+        long chunkEnd = out.getCount();
+
+        ColumnMetaData cmd = new ColumnMetaData(
+                leaf.physicalType,
+                List.of(Encoding.RLE, Encoding.PLAIN),
+                List.of(leaf.name),
+                toThriftCodec(compressionCodec),
+                values.size(),
+                (long) (uncompressed.length + (chunkEnd - chunkStart - compressed.length)),
+                chunkEnd - chunkStart,
+                chunkStart);
+        cmd.setData_page_offset(chunkStart);
+
+        ColumnChunk chunk = new ColumnChunk(chunkStart);
+        chunk.setMeta_data(cmd);
+
+        ColumnChunkResult res = new ColumnChunkResult();
+        res.chunk = chunk;
+        res.uncompressed = cmd.getTotal_uncompressed_size();
+        res.compressed = cmd.getTotal_compressed_size();
+        return res;
+    }
+
+    private static Object coerceForParquet(CellValue cv, TableLeafColumn leaf) {
+        Object val = cv.value();
+        if (val == null) return null;
+
+        Type pt = leaf.physicalType;
+        return switch (pt) {
+            case BOOLEAN -> {
+                if (val instanceof Boolean) yield val;
+                yield cv.asBoolean();
+            }
+            case INT32 -> {
+                if (val instanceof Integer) yield val;
+                if (val instanceof LocalDate ld) yield (int) ld.toEpochDay();
+                yield cv.asInt();
+            }
+            case INT64 -> {
+                if (val instanceof Long) yield val;
+                yield cv.asLong();
+            }
+            case FLOAT -> {
+                if (val instanceof Float) yield val;
+                yield (float) cv.asDouble();
+            }
+            case DOUBLE -> {
+                if (val instanceof Double) yield val;
+                yield cv.asDouble();
+            }
+            case BYTE_ARRAY -> {
+                if (val instanceof String) yield val;
+                yield cv.asString();
+            }
+            default -> cv.asString();
+        };
+    }
+
+    private List<SchemaElement> buildTableSchemaElements(List<TableLeafColumn> leaves) {
+        List<SchemaElement> schema = new ArrayList<>();
+        SchemaElement root = new SchemaElement("root");
+        root.setNum_children(leaves.size());
+        schema.add(root);
+
+        for (TableLeafColumn lc : leaves) {
+            SchemaElement se = new SchemaElement(lc.name);
+            se.setType(lc.physicalType);
+            se.setRepetition_type(FieldRepetitionType.OPTIONAL); // all Table columns are optional
+            if (lc.logicalType != null) se.setLogicalType(lc.logicalType);
+            if (lc.convertedType != null) se.setConverted_type(lc.convertedType);
+            schema.add(se);
+        }
+        return schema;
+    }
+
+    private static final class TableLeafColumn {
+        String name;
+        Type physicalType;
+        LogicalType logicalType;
+        ConvertedType convertedType;
     }
 
     // ---------- Row group / column chunk writing ----------

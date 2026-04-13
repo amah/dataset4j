@@ -21,8 +21,8 @@ Java 17+ required. Maven 3.6+.
 
 ## Module Structure
 
-- **dataset4j-core** — Core `Dataset<T>` API, annotation framework (`@DataColumn`, `@GenerateFields`, `@DataTable`), metadata extraction (`PojoMetadata`, `FieldMeta`, `FieldSelector`), and the `FieldConstantProcessor` annotation processor. No external dependencies.
-- **dataset4j-poi** — Excel read/write (Apache POI) and CSV write (OpenCSV). Key classes: `ExcelDatasetReader`, `ExcelDatasetWriter`, `CsvDatasetWriter`, `CellWriter` interface, `DefaultCellWriter`. Depends on dataset4j-core.
+- **dataset4j-core** — Core `Dataset<T>` API, `Table` (untyped tabular data), `CellValue`/`ValueType` (source type preservation), annotation framework (`@DataColumn`, `@GenerateFields`, `@DataTable`), metadata extraction (`PojoMetadata`, `FieldMeta`, `FieldSelector`), and the `FieldConstantProcessor` annotation processor. No external dependencies.
+- **dataset4j-poi** — Excel read/write (Apache POI), CSV read/write (OpenCSV). Key classes: `ExcelDatasetReader`, `ExcelDatasetWriter`, `CsvDatasetReader`, `CsvDatasetWriter`, `CellWriter` interface, `DefaultCellWriter`. Depends on dataset4j-core.
 - **dataset4j-parquet** — Lightweight Parquet read/write without Hadoop. Key classes: `ParquetDatasetReader`, `ParquetDatasetWriter`. Depends on dataset4j-core.
 - **dataset4j** — Shaded uber-JAR aggregating all modules for single-dependency consumption.
 
@@ -37,3 +37,5 @@ Java 17+ required. Maven 3.6+.
 **Reader/Writer pattern**: All I/O classes use fluent builders (e.g., `ExcelDatasetWriter.toFile("out.xlsx").sheet("Data").fields(...).write(dataset)`). Writers accept a `Dataset<T>` and use metadata reflection to map record components to columns. The `CellWriter` functional interface allows custom cell formatting; `DefaultCellWriter` handles standard type mapping.
 
 **Shared rendering**: `ExcelSheetRenderer` + `SheetRenderConfig` (package-private) contain the shared Excel sheet rendering logic used by both `ExcelDatasetWriter` (single-sheet) and `ExcelWorkbookWriter` (multi-sheet).
+
+**Table (untyped data)**: `Table` is the schema-free sibling of `Dataset<T>`. It stores rows as `List<Map<String, CellValue>>` where each `CellValue` carries the raw value, a `ValueType` enum (STRING, NUMBER, BOOLEAN, DATE, DATETIME, TIME, FORMULA, BLANK, ERROR), and an optional format string from the source (e.g. Excel `"$#,##0.00"`). Typed column accessors (`intColumn()`, `doubleColumn()`, etc.) use coercion, not casting. Readers have `readTable()` methods; writers have `writeTable()` methods. `Dataset.toTable()` and `Table.toDataset(Class<T>)` convert between the two. See `docs/TABLE.md` for full documentation.

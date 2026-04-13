@@ -4,6 +4,11 @@ This directory contains comprehensive documentation for the Dataset4J library.
 
 ## 📁 **Structure**
 
+### 📊 **Core Features**
+
+- **[`TABLE.md`](TABLE.md)** - `Table` — untyped tabular data container (schema-free sibling of `Dataset<T>`)
+- **[`CELLVALUE_COERCION.md`](CELLVALUE_COERCION.md)** - CellValue coercion rules and source-specific type mapping
+
 ### 🤖 **AI Instructions** (`ai-instructions/`)
 Complete guidance for AI coding assistants working with Dataset4J:
 
