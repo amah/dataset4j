@@ -675,6 +675,44 @@ class DatasetTest {
             assertEquals(3, result.filter(p -> p.right().dept().equals("Eng")).size());
         }
 
+        @Test void fullJoinPair() {
+            var deptsWithHR = Dataset.of(
+                new Department("Eng", "SF"),
+                new Department("Sales", "NYC"),
+                new Department("HR", "Chicago")
+            );
+            var result = EMPLOYEES.fullJoin(deptsWithHR, Employee::dept, Department::dept);
+
+            // HR has no employees → left is null
+            var hrRows = result.filter(p -> p.right() != null && p.right().dept().equals("HR"));
+            assertEquals(1, hrRows.size());
+            assertNull(hrRows.get(0).left());
+
+            // Eng has 3 employees matched
+            assertEquals(3, result.filter(p -> p.right() != null && p.right().dept().equals("Eng")).size());
+
+            // Sales has 2 employees matched
+            assertEquals(2, result.filter(p -> p.right() != null && p.right().dept().equals("Sales")).size());
+
+            // Total: 3 Eng + 2 Sales + 1 HR(null left) = 6
+            assertEquals(6, result.size());
+        }
+
+        @Test void fullJoinCustom() {
+            var deptsPartial = Dataset.of(
+                new Department("Eng", "SF")
+            );
+            // Sales employees (Bob, Diana) have no match → right is null
+            var result = EMPLOYEES.fullJoin(deptsPartial,
+                Employee::dept, Department::dept,
+                (e, d) -> e != null ? e.name() + ":" + (d != null ? d.dept() : "none")
+                                    : "none:" + d.dept());
+            // 3 Eng matched + 2 Sales unmatched
+            assertEquals(5, result.size());
+            assertTrue(result.stream().anyMatch(s -> s.equals("Bob:none")));
+            assertTrue(result.stream().anyMatch(s -> s.equals("Alice:Eng")));
+        }
+
         @Test void crossJoin() {
             record Color(String name) {}
             record Size(String label) {}
@@ -849,6 +887,26 @@ class DatasetTest {
             assertNull(bob.right()); // Bob is Sales-NYC, no matching dept
         }
 
+        @Test void fullJoinMulti() {
+            var joined = EMP_EXT.fullJoinMulti(DEPT_EXT,
+                e -> key(e.dept(), e.location()),
+                d -> key(d.dept(), d.location()));
+
+            // 3 matched (Alice, Charlie, Diana) + 1 unmatched left (Bob: Sales-NYC) + 1 unmatched right (Sales-LA)
+            assertEquals(5, joined.size());
+
+            var bob = joined.stream()
+                .filter(p -> p.left() != null && p.left().name().equals("Bob"))
+                .findFirst().orElseThrow();
+            assertNull(bob.right());
+
+            var unmatchedRight = joined.stream()
+                .filter(p -> p.left() == null)
+                .toList();
+            assertEquals(1, unmatchedRight.size());
+            assertEquals("LA", unmatchedRight.get(0).right().location());
+        }
+
         @Test void innerJoin2Convenience() {
             var joined = EMP_EXT.innerJoin2(DEPT_EXT,
                 EmployeeExt::dept, EmployeeExt::location,
@@ -875,6 +933,20 @@ class DatasetTest {
                 .filter(p -> p.right() == null)
                 .count();
             assertEquals(1, nullCount); // Bob has no match
+        }
+
+        @Test void fullJoin2Convenience() {
+            var joined = EMP_EXT.fullJoin2(DEPT_EXT,
+                EmployeeExt::dept, EmployeeExt::location,
+                DepartmentExt::dept, DepartmentExt::location);
+
+            // 3 matched + 1 unmatched left (Bob) + 1 unmatched right (Sales-LA)
+            assertEquals(5, joined.size());
+
+            long nullLeftCount = joined.stream().filter(p -> p.left() == null).count();
+            long nullRightCount = joined.stream().filter(p -> p.right() == null).count();
+            assertEquals(1, nullLeftCount);
+            assertEquals(1, nullRightCount);
         }
 
         @Test void innerJoin3KeysConvenience() {
@@ -969,6 +1041,20 @@ class DatasetTest {
                             p.right().location().equals("LA"))
                 .findFirst().orElseThrow();
             assertNull(salesLA.left());
+        }
+
+        @Test void fullJoinOnFluent() {
+            var joined = EMP_EXT.fullJoinOn(DEPT_EXT,
+                on(EmployeeExt::dept, EmployeeExt::location),
+                on(DepartmentExt::dept, DepartmentExt::location));
+
+            // 3 matched + 1 unmatched left (Bob) + 1 unmatched right (Marketing-LA)
+            assertEquals(5, joined.size());
+
+            long nullLeftCount = joined.stream().filter(p -> p.left() == null).count();
+            long nullRightCount = joined.stream().filter(p -> p.right() == null).count();
+            assertEquals(1, nullLeftCount);
+            assertEquals(1, nullRightCount);
         }
 
         @Test void fluentJoinWithThreeKeys() {
@@ -1071,6 +1157,25 @@ class DatasetTest {
             var joined = EMPLOYEES.leftJoin(Dataset.<Department>empty(), Employee::dept, Department::dept);
             assertEquals(5, joined.size());
             assertTrue(joined.all(p -> !p.hasRight()));
+        }
+
+        @Test void fullJoinEmptyLeft() {
+            var depts = Dataset.of(new Department("Eng", "SF"));
+            var joined = Dataset.<Employee>empty().fullJoin(depts, Employee::dept, Department::dept);
+            assertEquals(1, joined.size());
+            assertNull(joined.get(0).left());
+            assertEquals("Eng", joined.get(0).right().dept());
+        }
+
+        @Test void fullJoinEmptyRight() {
+            var joined = EMPLOYEES.fullJoin(Dataset.<Department>empty(), Employee::dept, Department::dept);
+            assertEquals(5, joined.size());
+            assertTrue(joined.all(p -> p.right() == null));
+        }
+
+        @Test void fullJoinBothEmpty() {
+            var joined = Dataset.<Employee>empty().fullJoin(Dataset.<Department>empty(), Employee::dept, Department::dept);
+            assertTrue(joined.isEmpty());
         }
 
         @Test void crossJoinWithEmpty() {

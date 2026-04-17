@@ -602,6 +602,54 @@ public class Dataset<T> implements Iterable<T> {
     }
 
     /**
+     * Full outer join: pd.merge(left, right, on=key, how="outer")
+     *
+     * joiner receives null for the left side when there's no match on the left,
+     * and null for the right side when there's no match on the right.
+     */
+    public <R, K, J> Dataset<J> fullJoin(
+            Dataset<R> right,
+            Function<T, K> leftKey,
+            Function<R, K> rightKey,
+            BiFunction<T, R, J> joiner) {
+        Map<K, List<R>> rightIndex = right.rows.stream()
+            .collect(Collectors.groupingBy(rightKey));
+        Set<K> matchedRightKeys = new HashSet<>();
+        List<J> result = new ArrayList<>();
+        for (T leftRow : rows) {
+            K key = leftKey.apply(leftRow);
+            List<R> matches = rightIndex.get(key);
+            if (matches == null) {
+                result.add(joiner.apply(leftRow, null));
+            } else {
+                matchedRightKeys.add(key);
+                for (R rightRow : matches) {
+                    result.add(joiner.apply(leftRow, rightRow));
+                }
+            }
+        }
+        for (R rightRow : right.rows) {
+            if (!matchedRightKeys.contains(rightKey.apply(rightRow))) {
+                result.add(joiner.apply(null, rightRow));
+            }
+        }
+        return new Dataset<>(result);
+    }
+
+    /**
+     * Full outer join returning Pair: pd.merge(left, right, on=key, how="outer")
+     *
+     * {@code pair.left()} is null when there is no match on the left side,
+     * {@code pair.right()} is null when there is no match on the right side.
+     */
+    public <R, K> Dataset<Pair<T, R>> fullJoin(
+            Dataset<R> right,
+            Function<T, K> leftKey,
+            Function<R, K> rightKey) {
+        return fullJoin(right, leftKey, rightKey, Pair::new);
+    }
+
+    /**
      * Cross join (cartesian product): every left row paired with every right row.
      *
      * <pre>
@@ -660,6 +708,16 @@ public class Dataset<T> implements Iterable<T> {
     }
 
     /**
+     * Full outer join on multiple keys using CompositeKey.
+     */
+    public <R> Dataset<Pair<T, R>> fullJoinMulti(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKey,
+            Function<R, CompositeKey> rightKey) {
+        return fullJoin(right, leftKey, rightKey);
+    }
+
+    /**
      * Inner join on exactly 2 keys (convenience method).
      *
      * <pre>
@@ -685,6 +743,18 @@ public class Dataset<T> implements Iterable<T> {
             Function<T, K1> leftKey1, Function<T, K2> leftKey2,
             Function<R, K1> rightKey1, Function<R, K2> rightKey2) {
         return leftJoin(right,
+            row -> CompositeKey.of(leftKey1.apply(row), leftKey2.apply(row)),
+            row -> CompositeKey.of(rightKey1.apply(row), rightKey2.apply(row)));
+    }
+
+    /**
+     * Full outer join on exactly 2 keys (convenience method).
+     */
+    public <R, K1, K2> Dataset<Pair<T, R>> fullJoin2(
+            Dataset<R> right,
+            Function<T, K1> leftKey1, Function<T, K2> leftKey2,
+            Function<R, K1> rightKey1, Function<R, K2> rightKey2) {
+        return fullJoin(right,
             row -> CompositeKey.of(leftKey1.apply(row), leftKey2.apply(row)),
             row -> CompositeKey.of(rightKey1.apply(row), rightKey2.apply(row)));
     }
@@ -741,6 +811,16 @@ public class Dataset<T> implements Iterable<T> {
             Function<T, CompositeKey> leftKeyFactory,
             Function<R, CompositeKey> rightKeyFactory) {
         return rightJoin(right, leftKeyFactory, rightKeyFactory);
+    }
+
+    /**
+     * Full outer join with fluent key specification using property accessors.
+     */
+    public <R> Dataset<Pair<T, R>> fullJoinOn(
+            Dataset<R> right,
+            Function<T, CompositeKey> leftKeyFactory,
+            Function<R, CompositeKey> rightKeyFactory) {
+        return fullJoin(right, leftKeyFactory, rightKeyFactory);
     }
 
     // ---------------------------------------------------------------
