@@ -93,6 +93,29 @@ class ParquetSimpleTest {
     }
 
     @Test
+    void shouldStreamRecordsViaForEach() throws IOException {
+        Path parquetFile = tempDir.resolve("stream_test.parquet");
+        Dataset<SimpleEmployee> originalData = Dataset.of(
+            new SimpleEmployee(1, "John Doe", "john@company.com", true,
+                new BigDecimal("75000.50"), LocalDate.of(1990, 5, 15)),
+            new SimpleEmployee(2, "Jane Smith", "jane@company.com", false,
+                new BigDecimal("82000.00"), LocalDate.of(1985, 10, 22)),
+            new SimpleEmployee(3, "Bob Wilson", "bob@company.com", true,
+                new BigDecimal("65000.75"), LocalDate.of(1992, 2, 8))
+        );
+        ParquetDatasetWriter.toFile(parquetFile.toString()).write(originalData);
+
+        java.util.List<SimpleEmployee> collected = new java.util.ArrayList<>();
+        ParquetDatasetReader.fromFile(parquetFile.toString())
+            .forEach(SimpleEmployee.class, collected::add);
+
+        assertEquals(3, collected.size());
+        assertEquals("John Doe", collected.get(0).name());
+        assertEquals(Integer.valueOf(2), collected.get(1).id());
+        assertEquals(new BigDecimal("65000.75"), collected.get(2).salary());
+    }
+
+    @Test
     void shouldSupportLZ4Compression() throws IOException {
         Path parquetFile = tempDir.resolve("test_lz4.parquet");
         SimpleEmployee original = new SimpleEmployee(1, "Alice Brown", "alice@company.com", true,

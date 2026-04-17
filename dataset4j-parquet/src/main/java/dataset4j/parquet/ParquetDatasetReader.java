@@ -30,11 +30,13 @@ import java.time.OffsetDateTime;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Lightweight Parquet reader producing Datasets of Java records.
@@ -119,6 +121,36 @@ public class ParquetDatasetReader {
 
     /** Read the Parquet file into a Dataset of records. */
     public <T> Dataset<T> readAs(Class<T> recordClass) throws IOException {
+        List<T> result = new ArrayList<>();
+        processRowGroups(recordClass, result::add);
+        return Dataset.of(result);
+    }
+
+    /**
+     * Stream records one at a time without materializing the full Dataset in memory.
+     * Processes row groups sequentially, releasing each row group's decoded column arrays
+     * before moving to the next. Use this instead of {@link #readAs} when the file is too
+     * large to hold in memory all at once.
+     *
+     * <p>Example:
+     * <pre>{@code
+     * ParquetDatasetReader.fromFile("huge.parquet")
+     *     .forEach(Employee.class, employee -> {
+     *         process(employee);
+     *     });
+     * }</pre>
+     */
+    public <T> void forEach(Class<T> recordClass, Consumer<T> consumer) throws IOException {
+        processRowGroups(recordClass, consumer);
+    }
+
+    /**
+     * Shared row-group iteration: decode each row group's columns, instantiate records row-by-row,
+     * and deliver each record to {@code handler}. Column arrays for one row group are released
+     * before the next row group is decoded, keeping peak memory proportional to the largest single
+     * row group rather than the whole file.
+     */
+    private <T> void processRowGroups(Class<T> recordClass, Consumer<T> handler) throws IOException {
         long fileSize = Files.size(filePath);
         if (fileSize > maxFileSize) {
             throw new IOException("File too large: " + fileSize + " bytes (max " + maxFileSize + " bytes). "
@@ -154,8 +186,6 @@ public class ParquetDatasetReader {
                     for (int i = 0; i < components.length; i++) {
                         if (components[i].getName().equals(cm.getFieldName())) {
                             parquetColToComponentIdx.put(cm.getEffectiveColumnName(), i);
-                            // Also register the bare field name as a fallback for files whose
-                            // schema uses the field name rather than the annotated column name.
                             parquetColToComponentIdx.putIfAbsent(cm.getFieldName(), i);
                             componentMetas[i] = cm;
                             break;
@@ -177,28 +207,26 @@ public class ParquetDatasetReader {
                 throw new IOException("No canonical constructor on " + recordClass.getName(), e);
             }
 
-            List<T> result = new ArrayList<>();
             int rowOffset = 0;
             for (RowGroup rg : fmd.getRow_groups()) {
                 int numRows = (int) rg.getNum_rows();
-                // values[componentIdx] = decoded column array for that record component (may be null
-                // if the file has no matching column).
-                Object[][] values = new Object[components.length][];
-                String[] columnPaths = new String[components.length];
+                // columns[componentIdx] = decoded column data for that record component (null if
+                // the file has no matching column). Each ColumnChunkData uses primitive arrays
+                // where possible to avoid the ~4× boxing blow-up of Object[] for numeric columns.
+                ColumnChunkData[] columns = new ColumnChunkData[components.length];
                 for (ColumnChunk cc : rg.getColumns()) {
                     ColumnMetaData cmd = cc.getMeta_data();
                     String colName = cmd.getPath_in_schema().get(0);
                     Integer compIdx = parquetColToComponentIdx.get(colName);
-                    if (compIdx == null) continue; // file column not present in record — skip
+                    if (compIdx == null) continue;
                     SchemaElement se = schemaByName.get(colName);
-                    values[compIdx] = readColumnChunk(ch, cmd, se, numRows);
-                    columnPaths[compIdx] = colName;
+                    columns[compIdx] = readColumnChunk(ch, cmd, se, numRows);
                 }
 
                 for (int row = 0; row < numRows; row++) {
                     Object[] args = new Object[components.length];
                     for (int i = 0; i < components.length; i++) {
-                        Object raw = values[i] == null ? null : values[i][row];
+                        Object raw = columns[i] == null ? null : columns[i].valueAt(row);
                         Class<?> targetType = components[i].getType();
                         ColumnMetadata cm = componentMetas[i];
                         try {
@@ -215,8 +243,9 @@ public class ParquetDatasetReader {
                                     .build();
                         }
                     }
+                    T record;
                     try {
-                        result.add(ctor.newInstance(args));
+                        record = ctor.newInstance(args);
                     } catch (ReflectiveOperationException e) {
                         throw DatasetReadException.builder()
                                 .row(rowOffset + row)
@@ -225,10 +254,10 @@ public class ParquetDatasetReader {
                                 .cause(e)
                                 .build();
                     }
+                    handler.accept(record);
                 }
                 rowOffset += numRows;
             }
-            return Dataset.of(result);
         }
     }
 
@@ -271,7 +300,7 @@ public class ParquetDatasetReader {
                 int numRows = (int) rg.getNum_rows();
 
                 // Decode each column chunk
-                Map<String, Object[]> columnData = new LinkedHashMap<>();
+                Map<String, ColumnChunkData> columnData = new LinkedHashMap<>();
                 Map<String, SchemaElement> columnSchemas = new LinkedHashMap<>();
                 for (ColumnChunk cc : rg.getColumns()) {
                     ColumnMetaData cmd = cc.getMeta_data();
@@ -286,8 +315,8 @@ public class ParquetDatasetReader {
                 for (int row = 0; row < numRows; row++) {
                     Map<String, CellValue> rowMap = new LinkedHashMap<>();
                     for (String colName : columnNames) {
-                        Object[] data = columnData.get(colName);
-                        Object raw = (data != null && row < data.length) ? data[row] : null;
+                        ColumnChunkData data = columnData.get(colName);
+                        Object raw = data == null ? null : data.valueAt(row);
                         SchemaElement se = columnSchemas.get(colName);
                         rowMap.put(colName, toCellValue(raw, se));
                     }
@@ -378,9 +407,16 @@ public class ParquetDatasetReader {
 
     // ---------- Column chunk decoding ----------
 
-    private Object[] readColumnChunk(FileChannel ch, ColumnMetaData cmd, SchemaElement se, int numRows)
+    /**
+     * Decode one column chunk into a {@link ColumnChunkData}. Uses a primitive array
+     * (int[]/long[]/float[]/double[]/boolean[]) for numeric/boolean columns without logical
+     * type conversion, avoiding the ~4× boxing overhead of holding an {@code Object[numRows]}
+     * of {@code Integer}/{@code Long}/{@code Double} for the whole row group. Columns that
+     * need a reference-typed representation (strings, decimals, dates, byte[]) fall back to
+     * {@code Object[]}.
+     */
+    private ColumnChunkData readColumnChunk(FileChannel ch, ColumnMetaData cmd, SchemaElement se, int numRows)
             throws IOException {
-        // The chunk starts at the dictionary page if one is present, otherwise at the first data page.
         long firstPageOffset = cmd.isSetDictionary_page_offset() && cmd.getDictionary_page_offset() > 0
                 ? cmd.getDictionary_page_offset()
                 : cmd.getData_page_offset();
@@ -393,10 +429,25 @@ public class ParquetDatasetReader {
         readFully(ch, chunkBuf);
         ByteArrayInputStream bais = new ByteArrayInputStream(chunkBuf.array());
 
-        Object[] dictionary = null;
-        Object[] out = new Object[numRows];
-        int rowIdx = 0;
+        ColumnChunkData.Kind kind = storageKind(se);
+        // Destination arrays — only one is non-null, matching kind.
+        int[] ints = kind == ColumnChunkData.Kind.INT ? new int[numRows] : null;
+        long[] longs = kind == ColumnChunkData.Kind.LONG ? new long[numRows] : null;
+        float[] floats = kind == ColumnChunkData.Kind.FLOAT ? new float[numRows] : null;
+        double[] doubles = kind == ColumnChunkData.Kind.DOUBLE ? new double[numRows] : null;
+        boolean[] booleans = kind == ColumnChunkData.Kind.BOOLEAN ? new boolean[numRows] : null;
+        Object[] objects = kind == ColumnChunkData.Kind.OBJECT ? new Object[numRows] : null;
+        BitSet nullMask = null;
 
+        // Dictionary storage (same kind as output, if a dictionary page is present)
+        int[] dictInts = null;
+        long[] dictLongs = null;
+        float[] dictFloats = null;
+        double[] dictDoubles = null;
+        boolean[] dictBooleans = null;
+        Object[] dictObjects = null;
+
+        int rowIdx = 0;
         while (rowIdx < numRows && bais.available() > 0) {
             PageHeader ph = Util.readPageHeader(bais);
             int compressedPageSize = ph.getCompressed_page_size();
@@ -413,8 +464,14 @@ public class ParquetDatasetReader {
             if (pt == PageType.DICTIONARY_PAGE) {
                 DictionaryPageHeader dictHeader = ph.getDictionary_page_header();
                 int numEntries = dictHeader.getNum_values();
-                // Dictionary entries are PLAIN-encoded values of the column's physical type.
-                dictionary = decodePlainValues(pageBuf, se, numEntries);
+                switch (kind) {
+                    case INT -> dictInts = decodePlainInts(pageBuf, numEntries);
+                    case LONG -> dictLongs = decodePlainLongs(pageBuf, numEntries);
+                    case FLOAT -> dictFloats = decodePlainFloats(pageBuf, numEntries);
+                    case DOUBLE -> dictDoubles = decodePlainDoubles(pageBuf, numEntries);
+                    case BOOLEAN -> dictBooleans = ParquetIo.decodePlainBooleans(pageBuf, numEntries);
+                    case OBJECT -> dictObjects = decodePlainObjects(pageBuf, se, numEntries);
+                }
                 continue;
             }
             if (pt != PageType.DATA_PAGE) {
@@ -436,53 +493,164 @@ public class ParquetDatasetReader {
                 nonNullCount = pageNumValues;
             }
 
-            Object[] decoded;
+            // Decode the non-null values into a tmp buffer of the right primitive type,
+            // then scatter into the destination array guided by defLevels. The tmp buffer
+            // is sized to nonNullCount and becomes garbage after this page.
+            int writable = Math.min(pageNumValues, numRows - rowIdx);
             Encoding enc = dph.getEncoding();
+
             if (enc == Encoding.PLAIN) {
-                decoded = decodePlainValues(pageBuf, se, nonNullCount);
-            } else if (enc == Encoding.RLE_DICTIONARY || enc == Encoding.PLAIN_DICTIONARY) {
-                if (dictionary == null) {
-                    throw new IOException("Dictionary-encoded data page for column "
-                            + se.getName() + " has no preceding dictionary page");
+                switch (kind) {
+                    case INT -> {
+                        int[] tmp = decodePlainInts(pageBuf, nonNullCount);
+                        nullMask = scatterInts(tmp, ints, defLevels, writable, rowIdx, nullMask, numRows);
+                    }
+                    case LONG -> {
+                        long[] tmp = decodePlainLongs(pageBuf, nonNullCount);
+                        nullMask = scatterLongs(tmp, longs, defLevels, writable, rowIdx, nullMask, numRows);
+                    }
+                    case FLOAT -> {
+                        float[] tmp = decodePlainFloats(pageBuf, nonNullCount);
+                        nullMask = scatterFloats(tmp, floats, defLevels, writable, rowIdx, nullMask, numRows);
+                    }
+                    case DOUBLE -> {
+                        double[] tmp = decodePlainDoubles(pageBuf, nonNullCount);
+                        nullMask = scatterDoubles(tmp, doubles, defLevels, writable, rowIdx, nullMask, numRows);
+                    }
+                    case BOOLEAN -> {
+                        boolean[] tmp = ParquetIo.decodePlainBooleans(pageBuf, nonNullCount);
+                        nullMask = scatterBooleans(tmp, booleans, defLevels, writable, rowIdx, nullMask, numRows);
+                    }
+                    case OBJECT -> {
+                        Object[] tmp = decodePlainObjects(pageBuf, se, nonNullCount);
+                        nullMask = scatterObjects(tmp, objects, defLevels, writable, rowIdx, nullMask, numRows);
+                    }
                 }
+                rowIdx += writable;
+            } else if (enc == Encoding.RLE_DICTIONARY || enc == Encoding.PLAIN_DICTIONARY) {
                 int bitWidth = pageBuf.get() & 0xFF;
                 int[] indices = ParquetIo.decodeHybrid(pageBuf, bitWidth, nonNullCount, pageBuf.limit());
-                decoded = new Object[nonNullCount];
-                for (int i = 0; i < nonNullCount; i++) decoded[i] = dictionary[indices[i]];
+                int di = 0;
+                for (int i = 0; i < writable; i++) {
+                    boolean isNull = defLevels != null && defLevels[i] != 1;
+                    if (isNull) {
+                        if (nullMask == null) nullMask = new BitSet(numRows);
+                        nullMask.set(rowIdx);
+                    } else {
+                        int idx = indices[di++];
+                        switch (kind) {
+                            case INT -> {
+                                if (dictInts == null) throw new IOException("Dictionary-encoded data page for column "
+                                        + se.getName() + " has no preceding dictionary page");
+                                ints[rowIdx] = dictInts[idx];
+                            }
+                            case LONG -> {
+                                if (dictLongs == null) throw new IOException("Dictionary-encoded data page for column "
+                                        + se.getName() + " has no preceding dictionary page");
+                                longs[rowIdx] = dictLongs[idx];
+                            }
+                            case FLOAT -> {
+                                if (dictFloats == null) throw new IOException("Dictionary-encoded data page for column "
+                                        + se.getName() + " has no preceding dictionary page");
+                                floats[rowIdx] = dictFloats[idx];
+                            }
+                            case DOUBLE -> {
+                                if (dictDoubles == null) throw new IOException("Dictionary-encoded data page for column "
+                                        + se.getName() + " has no preceding dictionary page");
+                                doubles[rowIdx] = dictDoubles[idx];
+                            }
+                            case BOOLEAN -> {
+                                if (dictBooleans == null) throw new IOException("Dictionary-encoded data page for column "
+                                        + se.getName() + " has no preceding dictionary page");
+                                booleans[rowIdx] = dictBooleans[idx];
+                            }
+                            case OBJECT -> {
+                                if (dictObjects == null) throw new IOException("Dictionary-encoded data page for column "
+                                        + se.getName() + " has no preceding dictionary page");
+                                objects[rowIdx] = dictObjects[idx];
+                            }
+                        }
+                    }
+                    rowIdx++;
+                }
             } else {
                 throw new IOException("Unsupported value encoding: " + enc
                         + " for column " + se.getName()
                         + " (supported: PLAIN, RLE_DICTIONARY, PLAIN_DICTIONARY)");
             }
-
-            // Weave decoded values + nulls into the output for this page
-            if (defLevels == null) {
-                int writable = Math.min(pageNumValues, numRows - rowIdx);
-                System.arraycopy(decoded, 0, out, rowIdx, writable);
-                rowIdx += writable;
-            } else {
-                int di = 0;
-                int writable = Math.min(pageNumValues, numRows - rowIdx);
-                for (int i = 0; i < writable; i++) {
-                    if (defLevels[i] == 1) out[rowIdx++] = decoded[di++];
-                    else out[rowIdx++] = null;
-                }
-            }
         }
+
+        return switch (kind) {
+            case INT -> ColumnChunkData.forInts(ints, nullMask);
+            case LONG -> ColumnChunkData.forLongs(longs, nullMask);
+            case FLOAT -> ColumnChunkData.forFloats(floats, nullMask);
+            case DOUBLE -> ColumnChunkData.forDoubles(doubles, nullMask);
+            case BOOLEAN -> ColumnChunkData.forBooleans(booleans, nullMask);
+            case OBJECT -> ColumnChunkData.forObjects(objects, nullMask);
+        };
+    }
+
+    /**
+     * Pick the primitive storage kind for a column, or OBJECT when a logical-type conversion
+     * (DATE, DECIMAL, STRING, byte[]) needs a reference-typed representation.
+     */
+    private static ColumnChunkData.Kind storageKind(SchemaElement se) {
+        Type t = se.getType();
+        boolean isDecimal = isLogicalDecimal(se);
+        boolean isDate = isLogicalDate(se);
+        return switch (t) {
+            case BOOLEAN -> ColumnChunkData.Kind.BOOLEAN;
+            case FLOAT -> ColumnChunkData.Kind.FLOAT;
+            case DOUBLE -> ColumnChunkData.Kind.DOUBLE;
+            case INT32 -> (isDate || isDecimal) ? ColumnChunkData.Kind.OBJECT : ColumnChunkData.Kind.INT;
+            case INT64 -> isDecimal ? ColumnChunkData.Kind.OBJECT : ColumnChunkData.Kind.LONG;
+            default -> ColumnChunkData.Kind.OBJECT; // BYTE_ARRAY, FIXED_LEN_BYTE_ARRAY, INT96
+        };
+    }
+
+    private static int[] decodePlainInts(ByteBuffer buf, int n) {
+        ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
+        int[] out = new int[n];
+        for (int i = 0; i < n; i++) out[i] = le.getInt();
+        buf.position(buf.position() + n * 4);
         return out;
     }
 
-    private Object[] decodePlainValues(ByteBuffer buf, SchemaElement se, int n) {
+    private static long[] decodePlainLongs(ByteBuffer buf, int n) {
+        ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
+        long[] out = new long[n];
+        for (int i = 0; i < n; i++) out[i] = le.getLong();
+        buf.position(buf.position() + n * 8);
+        return out;
+    }
+
+    private static float[] decodePlainFloats(ByteBuffer buf, int n) {
+        ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
+        float[] out = new float[n];
+        for (int i = 0; i < n; i++) out[i] = le.getFloat();
+        buf.position(buf.position() + n * 4);
+        return out;
+    }
+
+    private static double[] decodePlainDoubles(ByteBuffer buf, int n) {
+        ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
+        double[] out = new double[n];
+        for (int i = 0; i < n; i++) out[i] = le.getDouble();
+        buf.position(buf.position() + n * 8);
+        return out;
+    }
+
+    /**
+     * Decode PLAIN-encoded values for columns that need reference-typed representation:
+     * BYTE_ARRAY (String / byte[] / BigDecimal), FIXED_LEN_BYTE_ARRAY (byte[] / BigDecimal),
+     * and INT32/INT64 with DATE or DECIMAL logical types.
+     */
+    private static Object[] decodePlainObjects(ByteBuffer buf, SchemaElement se, int n) {
         Type t = se.getType();
         Object[] out = new Object[n];
         boolean isDecimal = isLogicalDecimal(se);
         int decimalScale = isDecimal ? se.getScale() : 0;
         switch (t) {
-            case BOOLEAN: {
-                boolean[] bs = ParquetIo.decodePlainBooleans(buf, n);
-                for (int i = 0; i < n; i++) out[i] = bs[i];
-                return out;
-            }
             case INT32: {
                 ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
                 boolean isDate = isLogicalDate(se);
@@ -502,18 +670,6 @@ public class ParquetDatasetReader {
                     if (isDecimal) out[i] = BigDecimal.valueOf(v, decimalScale);
                     else out[i] = Long.valueOf(v);
                 }
-                buf.position(buf.position() + n * 8);
-                return out;
-            }
-            case FLOAT: {
-                ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
-                for (int i = 0; i < n; i++) out[i] = le.getFloat();
-                buf.position(buf.position() + n * 4);
-                return out;
-            }
-            case DOUBLE: {
-                ByteBuffer le = buf.slice().order(ByteOrder.LITTLE_ENDIAN);
-                for (int i = 0; i < n; i++) out[i] = le.getDouble();
                 buf.position(buf.position() + n * 8);
                 return out;
             }
@@ -548,7 +704,166 @@ public class ParquetDatasetReader {
                 return out;
             }
             default:
-                throw new UnsupportedOperationException("Physical type not supported: " + t);
+                throw new UnsupportedOperationException("Physical type not supported for object path: " + t);
+        }
+    }
+
+    // Scatter helpers: write `tmp` (of size nonNullCount) into `dest` at [rowIdx, rowIdx+writable),
+    // guided by defLevels. Marks null rows in the returned (lazily-allocated) BitSet.
+
+    private static BitSet scatterInts(int[] tmp, int[] dest, int[] defLevels, int writable,
+                                       int rowIdx, BitSet nullMask, int numRows) {
+        if (defLevels == null) {
+            System.arraycopy(tmp, 0, dest, rowIdx, writable);
+            return nullMask;
+        }
+        int di = 0;
+        for (int i = 0; i < writable; i++) {
+            if (defLevels[i] == 1) dest[rowIdx + i] = tmp[di++];
+            else { if (nullMask == null) nullMask = new BitSet(numRows); nullMask.set(rowIdx + i); }
+        }
+        return nullMask;
+    }
+
+    private static BitSet scatterLongs(long[] tmp, long[] dest, int[] defLevels, int writable,
+                                        int rowIdx, BitSet nullMask, int numRows) {
+        if (defLevels == null) {
+            System.arraycopy(tmp, 0, dest, rowIdx, writable);
+            return nullMask;
+        }
+        int di = 0;
+        for (int i = 0; i < writable; i++) {
+            if (defLevels[i] == 1) dest[rowIdx + i] = tmp[di++];
+            else { if (nullMask == null) nullMask = new BitSet(numRows); nullMask.set(rowIdx + i); }
+        }
+        return nullMask;
+    }
+
+    private static BitSet scatterFloats(float[] tmp, float[] dest, int[] defLevels, int writable,
+                                         int rowIdx, BitSet nullMask, int numRows) {
+        if (defLevels == null) {
+            System.arraycopy(tmp, 0, dest, rowIdx, writable);
+            return nullMask;
+        }
+        int di = 0;
+        for (int i = 0; i < writable; i++) {
+            if (defLevels[i] == 1) dest[rowIdx + i] = tmp[di++];
+            else { if (nullMask == null) nullMask = new BitSet(numRows); nullMask.set(rowIdx + i); }
+        }
+        return nullMask;
+    }
+
+    private static BitSet scatterDoubles(double[] tmp, double[] dest, int[] defLevels, int writable,
+                                          int rowIdx, BitSet nullMask, int numRows) {
+        if (defLevels == null) {
+            System.arraycopy(tmp, 0, dest, rowIdx, writable);
+            return nullMask;
+        }
+        int di = 0;
+        for (int i = 0; i < writable; i++) {
+            if (defLevels[i] == 1) dest[rowIdx + i] = tmp[di++];
+            else { if (nullMask == null) nullMask = new BitSet(numRows); nullMask.set(rowIdx + i); }
+        }
+        return nullMask;
+    }
+
+    private static BitSet scatterBooleans(boolean[] tmp, boolean[] dest, int[] defLevels, int writable,
+                                           int rowIdx, BitSet nullMask, int numRows) {
+        if (defLevels == null) {
+            System.arraycopy(tmp, 0, dest, rowIdx, writable);
+            return nullMask;
+        }
+        int di = 0;
+        for (int i = 0; i < writable; i++) {
+            if (defLevels[i] == 1) dest[rowIdx + i] = tmp[di++];
+            else { if (nullMask == null) nullMask = new BitSet(numRows); nullMask.set(rowIdx + i); }
+        }
+        return nullMask;
+    }
+
+    private static BitSet scatterObjects(Object[] tmp, Object[] dest, int[] defLevels, int writable,
+                                          int rowIdx, BitSet nullMask, int numRows) {
+        if (defLevels == null) {
+            System.arraycopy(tmp, 0, dest, rowIdx, writable);
+            return nullMask;
+        }
+        int di = 0;
+        for (int i = 0; i < writable; i++) {
+            if (defLevels[i] == 1) dest[rowIdx + i] = tmp[di++];
+            else { if (nullMask == null) nullMask = new BitSet(numRows); nullMask.set(rowIdx + i); }
+        }
+        return nullMask;
+    }
+
+    /**
+     * Decoded column data. Numeric/boolean columns use a primitive array to avoid holding a
+     * boxed Integer/Long/Double/Float/Boolean per row for the whole row group — the main source
+     * of heap pressure in the old {@code Object[]} path. Columns with logical type conversions
+     * (String, BigDecimal, LocalDate, byte[]) use {@code Object[]}.
+     *
+     * <p>Nulls are tracked via a lazily-allocated {@link BitSet} so REQUIRED columns and nullable
+     * columns with no observed nulls pay no extra storage.
+     */
+    private static final class ColumnChunkData {
+        enum Kind { INT, LONG, FLOAT, DOUBLE, BOOLEAN, OBJECT }
+
+        private final Kind kind;
+        private final int[] ints;
+        private final long[] longs;
+        private final float[] floats;
+        private final double[] doubles;
+        private final boolean[] booleans;
+        private final Object[] objects;
+        private final BitSet nullMask;
+
+        private ColumnChunkData(Kind kind, int[] ints, long[] longs, float[] floats,
+                                 double[] doubles, boolean[] booleans, Object[] objects,
+                                 BitSet nullMask) {
+            this.kind = kind;
+            this.ints = ints;
+            this.longs = longs;
+            this.floats = floats;
+            this.doubles = doubles;
+            this.booleans = booleans;
+            this.objects = objects;
+            this.nullMask = nullMask;
+        }
+
+        static ColumnChunkData forInts(int[] v, BitSet nullMask) {
+            return new ColumnChunkData(Kind.INT, v, null, null, null, null, null, nullMask);
+        }
+        static ColumnChunkData forLongs(long[] v, BitSet nullMask) {
+            return new ColumnChunkData(Kind.LONG, null, v, null, null, null, null, nullMask);
+        }
+        static ColumnChunkData forFloats(float[] v, BitSet nullMask) {
+            return new ColumnChunkData(Kind.FLOAT, null, null, v, null, null, null, nullMask);
+        }
+        static ColumnChunkData forDoubles(double[] v, BitSet nullMask) {
+            return new ColumnChunkData(Kind.DOUBLE, null, null, null, v, null, null, nullMask);
+        }
+        static ColumnChunkData forBooleans(boolean[] v, BitSet nullMask) {
+            return new ColumnChunkData(Kind.BOOLEAN, null, null, null, null, v, null, nullMask);
+        }
+        static ColumnChunkData forObjects(Object[] v, BitSet nullMask) {
+            return new ColumnChunkData(Kind.OBJECT, null, null, null, null, null, v, nullMask);
+        }
+
+        /**
+         * Returns the row's value as Object, boxing primitives on the fly. The box lives only
+         * as long as the caller needs it — HotSpot's escape analysis can often elide it when
+         * the caller immediately passes it to {@code Constructor.newInstance} and the ctor
+         * unboxes into a primitive field.
+         */
+        Object valueAt(int row) {
+            if (nullMask != null && nullMask.get(row)) return null;
+            return switch (kind) {
+                case INT -> ints[row];
+                case LONG -> longs[row];
+                case FLOAT -> floats[row];
+                case DOUBLE -> doubles[row];
+                case BOOLEAN -> booleans[row];
+                case OBJECT -> objects[row];
+            };
         }
     }
 
