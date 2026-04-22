@@ -528,6 +528,12 @@ public class ExcelDatasetReader {
         if (type == java.time.LocalDateTime.class) {
             return java.time.LocalDateTime.parse(value, java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME);
         }
+        if (type == java.time.OffsetDateTime.class) {
+            return java.time.OffsetDateTime.parse(value);
+        }
+        if (type == java.time.ZonedDateTime.class) {
+            return java.time.ZonedDateTime.parse(value);
+        }
         return value;
     }
 
