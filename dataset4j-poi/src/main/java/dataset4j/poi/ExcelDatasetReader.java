@@ -48,6 +48,12 @@ public class ExcelDatasetReader {
     private final Map<Class<?>, Object> typeDefaults = new LinkedHashMap<>();
     private final Map<String, Object> fieldDefaults = new LinkedHashMap<>();
 
+    private FormulaErrorHandler formulaErrorHandler = FormulaErrorHandler.BLANK;
+
+    // Per-read scratch: a single evaluator is created once and reused for every formula cell
+    // (creating one per cell is O(n) × workbook-rebuild cost and was a major perf sink).
+    private FormulaEvaluator currentEvaluator;
+
     private ExcelDatasetReader(String filePath) {
         this.filePath = filePath;
     }
@@ -129,6 +135,21 @@ public class ExcelDatasetReader {
     }
 
     /**
+     * Install a handler invoked when a formula cell cannot be evaluated (or its cached
+     * result is an Excel error, e.g. {@code #DIV/0!}, {@code #N/A}).
+     *
+     * <p>The default is {@link FormulaErrorHandler#BLANK}, which treats the cell as blank
+     * and falls back to the field's configured default value.
+     *
+     * @param handler handler to invoke; if {@code null}, reverts to {@link FormulaErrorHandler#BLANK}
+     * @return this reader for chaining
+     */
+    public ExcelDatasetReader onFormulaError(FormulaErrorHandler handler) {
+        this.formulaErrorHandler = handler != null ? handler : FormulaErrorHandler.BLANK;
+        return this;
+    }
+
+    /**
      * Read Excel data into Dataset of specified record type.
      * @param <T> record type
      * @param recordClass record class with @DataColumn annotations
@@ -165,26 +186,31 @@ public class ExcelDatasetReader {
             }
 
             String resolvedSheetName = sheet.getSheetName();
+            this.currentEvaluator = workbook.getCreationHelper().createFormulaEvaluator();
 
-            // Build header index map for name-based column matching
-            Map<String, Integer> headerIndex = buildHeaderIndex(sheet);
+            try {
+                // Build header index map for name-based column matching
+                Map<String, Integer> headerIndex = buildHeaderIndex(sheet);
 
-            List<T> records = new ArrayList<>();
-            int dataStartRow = hasHeaders ? startRow + 1 : startRow;
+                List<T> records = new ArrayList<>();
+                int dataStartRow = hasHeaders ? startRow + 1 : startRow;
 
-            for (int rowIndex = dataStartRow; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
-                Row row = sheet.getRow(rowIndex);
-                if (row == null || isRowEmpty(row)) {
-                    continue;
+                for (int rowIndex = dataStartRow; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
+                    Row row = sheet.getRow(rowIndex);
+                    if (row == null || isRowEmpty(row)) {
+                        continue;
+                    }
+
+                    T record = parseRowToRecord(row, rowIndex, recordClass, columns, headerIndex, resolvedSheetName);
+                    if (record != null) {
+                        records.add(record);
+                    }
                 }
 
-                T record = parseRowToRecord(row, rowIndex, recordClass, columns, headerIndex, resolvedSheetName);
-                if (record != null) {
-                    records.add(record);
-                }
+                return Dataset.of(records);
+            } finally {
+                this.currentEvaluator = null;
             }
-
-            return Dataset.of(records);
         }
     }
 
@@ -474,22 +500,61 @@ public class ExcelDatasetReader {
                 }
             }
             case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
-            case FORMULA -> {
-                try {
-                    FormulaEvaluator evaluator = cell.getSheet().getWorkbook().getCreationHelper().createFormulaEvaluator();
-                    org.apache.poi.ss.usermodel.CellValue cellValue = evaluator.evaluate(cell);
-                    yield switch (cellValue.getCellType()) {
-                        case NUMERIC -> String.valueOf(cellValue.getNumberValue());
-                        case STRING -> cellValue.getStringValue();
-                        case BOOLEAN -> String.valueOf(cellValue.getBooleanValue());
-                        default -> "";
-                    };
-                } catch (Exception e) {
-                    yield ""; // Fallback for formula evaluation errors
-                }
-            }
+            case FORMULA -> evaluateFormula(cell, targetType);
             default -> "";
         };
+    }
+
+    /**
+     * Resolve a formula cell's value as a String.
+     *
+     * <p>Tries the cached result first (Excel writes the last-computed value to the file,
+     * so no re-evaluation is needed in the common case). Falls back to a single reused
+     * {@link FormulaEvaluator} if the cached value cannot be read. Any failure — or a
+     * cached {@code ERROR} — is routed through {@link #formulaErrorHandler}.
+     */
+    private String evaluateFormula(Cell cell, Class<?> targetType) {
+        try {
+            CellType cached = cell.getCachedFormulaResultType();
+            return switch (cached) {
+                case NUMERIC -> {
+                    if (DateUtil.isCellDateFormatted(cell)) {
+                        LocalDateTime ldt = cell.getLocalDateTimeCellValue();
+                        yield targetType == LocalDateTime.class ? ldt.toString() : ldt.toLocalDate().toString();
+                    }
+                    double numValue = cell.getNumericCellValue();
+                    yield numValue == (long) numValue
+                        ? String.valueOf((long) numValue)
+                        : String.valueOf(numValue);
+                }
+                case STRING -> cell.getStringCellValue();
+                case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
+                case ERROR -> nullToEmpty(formulaErrorHandler.handle(cell, null));
+                default -> "";
+            };
+        } catch (Exception cachedFailed) {
+            // Cached value unreadable — try a live evaluation with the reused evaluator.
+            try {
+                FormulaEvaluator evaluator = currentEvaluator;
+                if (evaluator == null) {
+                    evaluator = cell.getSheet().getWorkbook().getCreationHelper().createFormulaEvaluator();
+                }
+                org.apache.poi.ss.usermodel.CellValue cellValue = evaluator.evaluate(cell);
+                return switch (cellValue.getCellType()) {
+                    case NUMERIC -> String.valueOf(cellValue.getNumberValue());
+                    case STRING -> cellValue.getStringValue();
+                    case BOOLEAN -> String.valueOf(cellValue.getBooleanValue());
+                    case ERROR -> nullToEmpty(formulaErrorHandler.handle(cell, null));
+                    default -> "";
+                };
+            } catch (Exception evalFailed) {
+                return nullToEmpty(formulaErrorHandler.handle(cell, evalFailed));
+            }
+        }
+    }
+
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value;
     }
 
     private Object parseBasicValue(String value, Class<?> type) {
