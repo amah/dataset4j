@@ -174,6 +174,9 @@ public final class AnnotationProcessor {
             if (dataColumn.writeAs() != DataColumn.WriteAs.AUTO) {
                 builder.writeAs(dataColumn.writeAs());
             }
+            if (dataColumn.stripTimezone()) {
+                builder.stripTimezone(true);
+            }
         }
         
         return builder.build();

@@ -115,7 +115,20 @@ public @interface DataColumn {
      * @return array of alternative date format patterns
      */
     String[] alternativeDateFormats() default {};
-    
+
+    /**
+     * Allow reading a {@link java.time.LocalDateTime} field from a string cell that
+     * carries a timezone offset (e.g. {@code 2026-05-13T14:30:00+02:00} or {@code ...Z}).
+     * <p>When {@code true}, the parser falls back to {@link java.time.OffsetDateTime#parse(CharSequence)}
+     * then {@link java.time.ZonedDateTime#parse(CharSequence)} and discards the zone/offset,
+     * keeping only the local date-time part. This is a lossy conversion and is opt-in.
+     * <p>Has no effect on {@code OffsetDateTime} / {@code ZonedDateTime} fields, which
+     * already accept offsets natively.
+     *
+     * @return {@code true} to strip the zone/offset when parsing into {@code LocalDateTime}
+     */
+    boolean stripTimezone() default false;
+
     /**
      * Background color (hex format: #RRGGBB or standard color name).
      * @return the background color

@@ -266,11 +266,44 @@ public final class FormatProvider {
             // Fall through to error
         }
 
+        // Lossy fallback: strip zone/offset when the column opts in.
+        if (metadata.isStripTimezone()) {
+            LocalDateTime stripped = tryStripZoneToLocalDateTime(value);
+            if (stripped != null) {
+                return stripped;
+            }
+        }
+
         // If all formats failed, throw exception with details
         throw new IllegalArgumentException(
             String.format("Unable to parse datetime '%s' with format '%s' or alternatives %s",
                 value, metadata.getDateFormat(),
                 java.util.Arrays.toString(metadata.getAlternativeDateFormats())));
+    }
+
+    /**
+     * Try to parse a zoned ISO datetime string and return its local part, discarding
+     * the offset/zone. Returns {@code null} if neither {@link OffsetDateTime#parse(CharSequence)}
+     * nor {@link ZonedDateTime#parse(CharSequence)} succeeds.
+     *
+     * <p>This is a lossy conversion exposed for callers that explicitly opt in
+     * (e.g. the {@code stripTimezone} flag on {@link DataColumn} or on the Excel reader).
+     *
+     * @param value the input string (may contain {@code Z} or an offset like {@code +02:00})
+     * @return the local date-time, or {@code null} if parsing failed
+     */
+    public static LocalDateTime tryStripZoneToLocalDateTime(String value) {
+        if (value == null) return null;
+        try {
+            return OffsetDateTime.parse(value).toLocalDateTime();
+        } catch (Exception ignored) {
+            // try ZonedDateTime next
+        }
+        try {
+            return ZonedDateTime.parse(value).toLocalDateTime();
+        } catch (Exception ignored) {
+            return null;
+        }
     }
     
     /**

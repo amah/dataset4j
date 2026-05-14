@@ -8,6 +8,7 @@ import dataset4j.ValueType;
 import dataset4j.annotations.AnnotationProcessor;
 import dataset4j.annotations.ColumnMetadata;
 import dataset4j.annotations.FormatProvider;
+import dataset4j.util.ValuePool;
 import org.apache.parquet.format.*;
 
 import java.io.ByteArrayInputStream;
@@ -65,6 +66,8 @@ public class ParquetDatasetReader {
     private final Map<Class<?>, Object> typeDefaults = new LinkedHashMap<>();
     private final Map<String, Object> fieldDefaults = new LinkedHashMap<>();
 
+    private boolean internValues = false;
+
     private ParquetDatasetReader(String filePath) {
         this.filePath = Paths.get(filePath);
     }
@@ -99,6 +102,32 @@ public class ParquetDatasetReader {
      */
     public ParquetDatasetReader defaultValue(String fieldName, Object value) {
         this.fieldDefaults.put(fieldName, value);
+        return this;
+    }
+
+    /**
+     * Deduplicate equal immutable values across all rows of a single read so that a single
+     * heap object is retained for each unique value.
+     *
+     * <p>Parquet's dictionary encoding already shares references within one column chunk, but
+     * PLAIN-encoded object columns produce a fresh instance per row, and across row groups
+     * even dictionary entries are re-decoded. This flag collapses those duplicates.
+     *
+     * <p>For typed reads ({@link #readAs}/{@link #forEach}), strings, decimals, dates, and other
+     * reference-typed record components are pooled. Primitive components ({@code int}, {@code long},
+     * etc.) skip the pool — they're unboxed into the record's primitive field, so dedup would only
+     * add overhead.
+     *
+     * <p>For {@link #readTable()}, entire {@link dataset4j.CellValue} instances with the same
+     * {@code (value, type, format)} triple are collapsed to one record.
+     *
+     * <p>The pool is per-read and released as soon as the read returns.
+     *
+     * @param internValues {@code true} to enable per-read value deduplication
+     * @return this reader for chaining
+     */
+    public ParquetDatasetReader internValues(boolean internValues) {
+        this.internValues = internValues;
         return this;
     }
 
@@ -207,6 +236,8 @@ public class ParquetDatasetReader {
                 throw new IOException("No canonical constructor on " + recordClass.getName(), e);
             }
 
+            ValuePool pool = internValues ? new ValuePool() : null;
+
             int rowOffset = 0;
             for (RowGroup rg : fmd.getRow_groups()) {
                 int numRows = (int) rg.getNum_rows();
@@ -230,7 +261,12 @@ public class ParquetDatasetReader {
                         Class<?> targetType = components[i].getType();
                         ColumnMetadata cm = componentMetas[i];
                         try {
-                            args[i] = convertToTarget(raw, targetType, cm);
+                            Object converted = convertToTarget(raw, targetType, cm);
+                            // Skip pooling for primitive components — they unbox into the record's
+                            // primitive field and the box becomes garbage immediately.
+                            args[i] = (pool != null && !targetType.isPrimitive())
+                                ? pool.intern(converted)
+                                : converted;
                         } catch (RuntimeException e) {
                             throw DatasetReadException.builder()
                                     .row(rowOffset + row)
@@ -294,6 +330,8 @@ public class ParquetDatasetReader {
                 return Table.empty();
             }
 
+            ValuePool pool = internValues ? new ValuePool() : null;
+
             List<Map<String, CellValue>> allRows = new ArrayList<>();
 
             for (RowGroup rg : fmd.getRow_groups()) {
@@ -318,7 +356,8 @@ public class ParquetDatasetReader {
                         ColumnChunkData data = columnData.get(colName);
                         Object raw = data == null ? null : data.valueAt(row);
                         SchemaElement se = columnSchemas.get(colName);
-                        rowMap.put(colName, toCellValue(raw, se));
+                        CellValue cv = toCellValue(raw, se);
+                        rowMap.put(colName, pool != null ? pool.intern(cv) : cv);
                     }
                     allRows.add(rowMap);
                 }

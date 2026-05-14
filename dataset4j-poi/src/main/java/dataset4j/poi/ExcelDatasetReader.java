@@ -7,6 +7,7 @@ import dataset4j.Table;
 import dataset4j.ValueType;
 import dataset4j.annotations.AnnotationProcessor;
 import dataset4j.annotations.ColumnMetadata;
+import dataset4j.util.ValuePool;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
@@ -49,6 +50,14 @@ public class ExcelDatasetReader {
     private final Map<String, Object> fieldDefaults = new LinkedHashMap<>();
 
     private FormulaErrorHandler formulaErrorHandler = FormulaErrorHandler.BLANK;
+
+    private boolean stripTimezone = false;
+
+    private boolean internValues = false;
+
+    // Per-read scratch: pool that deduplicates equal values across all rows of one read.
+    // Created in readAs/readTable when internValues=true, cleared via finally to release memory.
+    private ValuePool currentPool;
 
     // Per-read scratch: a single evaluator is created once and reused for every formula cell
     // (creating one per cell is O(n) × workbook-rebuild cost and was a major perf sink).
@@ -150,6 +159,49 @@ public class ExcelDatasetReader {
     }
 
     /**
+     * Allow {@link java.time.LocalDateTime} fields to be read from string cells that carry
+     * a timezone offset (e.g. {@code 2026-05-13T14:30:00+02:00} or {@code ...Z}).
+     *
+     * <p>When {@code true}, after the standard ISO {@code LOCAL_DATE_TIME} parser fails, the
+     * reader falls back to {@link java.time.OffsetDateTime#parse(CharSequence)} then
+     * {@link java.time.ZonedDateTime#parse(CharSequence)} and keeps only the local part.
+     * This is a lossy conversion — the offset/zone is discarded.
+     *
+     * <p>Equivalent to setting {@link dataset4j.annotations.DataColumn#stripTimezone()} on every
+     * {@code LocalDateTime} field of the record; the per-field annotation can still opt in
+     * individually when this flag is left {@code false}.
+     *
+     * @param stripTimezone {@code true} to enable the lossy fallback for all {@code LocalDateTime} fields
+     * @return this reader for chaining
+     */
+    public ExcelDatasetReader stripTimezone(boolean stripTimezone) {
+        this.stripTimezone = stripTimezone;
+        return this;
+    }
+
+    /**
+     * Deduplicate equal immutable values across all rows of a single read so that a single
+     * heap object is retained for each unique value.
+     *
+     * <p>Helpful for spreadsheets with many repeated values — e.g. a status column with
+     * {@code "Active"}/{@code "Inactive"}, a category column, repeated dates, or recurring
+     * decimal amounts. Strings, numbers, dates, and (for {@link #readTable()}) entire
+     * {@link dataset4j.CellValue} instances are shared.
+     *
+     * <p>Trade-off: adds a small {@code HashMap} lookup per cell. For data dominated by
+     * unique values it only adds overhead; default is {@code false}.
+     *
+     * <p>The pool is per-read and released as soon as the read returns.
+     *
+     * @param internValues {@code true} to enable per-read value deduplication
+     * @return this reader for chaining
+     */
+    public ExcelDatasetReader internValues(boolean internValues) {
+        this.internValues = internValues;
+        return this;
+    }
+
+    /**
      * Read Excel data into Dataset of specified record type.
      * @param <T> record type
      * @param recordClass record class with @DataColumn annotations
@@ -187,6 +239,7 @@ public class ExcelDatasetReader {
 
             String resolvedSheetName = sheet.getSheetName();
             this.currentEvaluator = workbook.getCreationHelper().createFormulaEvaluator();
+            this.currentPool = internValues ? new ValuePool() : null;
 
             try {
                 // Build header index map for name-based column matching
@@ -210,6 +263,7 @@ public class ExcelDatasetReader {
                 return Dataset.of(records);
             } finally {
                 this.currentEvaluator = null;
+                this.currentPool = null;
             }
         }
     }
@@ -231,6 +285,8 @@ public class ExcelDatasetReader {
             if (sheet == null) {
                 throw new IllegalArgumentException("Sheet not found: " + sheetName);
             }
+
+            this.currentPool = internValues ? new ValuePool() : null;
 
             // Determine column names from header row or generate them
             List<String> columnNames;
@@ -275,13 +331,23 @@ public class ExcelDatasetReader {
                 for (int c = 0; c < columnNames.size(); c++) {
                     int cellIndex = firstCellNum + c;
                     Cell cell = row.getCell(cellIndex);
-                    rowMap.put(columnNames.get(c), extractCellValue(cell));
+                    rowMap.put(columnNames.get(c), maybeIntern(extractCellValue(cell)));
                 }
                 rows.add(rowMap);
             }
 
             return Table.of(columnNames, rows);
+        } finally {
+            this.currentPool = null;
         }
+    }
+
+    /**
+     * Pool the given value when {@link #internValues(boolean)} is enabled; otherwise
+     * return it unchanged.
+     */
+    private <V> V maybeIntern(V value) {
+        return currentPool != null ? currentPool.intern(value) : value;
     }
 
     /**
@@ -387,7 +453,7 @@ public class ExcelDatasetReader {
                     }
                     Cell cell = row.getCell(colIndex);
                     try {
-                        values[i] = parseCellValue(cell, component.getType(), columnMeta);
+                        values[i] = maybeIntern(parseCellValue(cell, component.getType(), columnMeta));
                     } catch (Exception e) {
                         String rawValue = cell != null ? getCellValueAsString(cell, component.getType()) : null;
                         throw DatasetReadException.builder()
@@ -591,7 +657,17 @@ public class ExcelDatasetReader {
             }
         }
         if (type == java.time.LocalDateTime.class) {
-            return java.time.LocalDateTime.parse(value, java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+            try {
+                return java.time.LocalDateTime.parse(value, java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+            } catch (java.time.format.DateTimeParseException e) {
+                if (stripTimezone) {
+                    java.time.LocalDateTime stripped = dataset4j.annotations.FormatProvider.tryStripZoneToLocalDateTime(value);
+                    if (stripped != null) {
+                        return stripped;
+                    }
+                }
+                throw e;
+            }
         }
         if (type == java.time.OffsetDateTime.class) {
             return java.time.OffsetDateTime.parse(value);

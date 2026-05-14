@@ -27,6 +27,7 @@ public final class ColumnMetadata {
     private final String[] alternativeDateFormats;
     private final int maxLength;
     private final DataColumn.WriteAs writeAs;
+    private final boolean stripTimezone;
 
     private ColumnMetadata(Builder builder) {
         this.recordComponent = builder.recordComponent;
@@ -43,6 +44,7 @@ public final class ColumnMetadata {
         this.alternativeDateFormats = builder.alternativeDateFormats;
         this.maxLength = builder.maxLength;
         this.writeAs = builder.writeAs;
+        this.stripTimezone = builder.stripTimezone;
     }
     
     /** @return the record component this metadata describes */
@@ -73,6 +75,8 @@ public final class ColumnMetadata {
     public int getMaxLength() { return maxLength; }
     /** @return the write-as mode */
     public DataColumn.WriteAs getWriteAs() { return writeAs; }
+    /** @return true if zone/offset should be stripped when parsing into LocalDateTime */
+    public boolean isStripTimezone() { return stripTimezone; }
     
     /**
      * Get the effective column name, falling back to field name if not specified.
@@ -135,6 +139,7 @@ public final class ColumnMetadata {
         private String[] alternativeDateFormats = {};
         private int maxLength = -1;
         private DataColumn.WriteAs writeAs = DataColumn.WriteAs.AUTO;
+        private boolean stripTimezone = false;
 
         /** Constructor. @param recordComponent the record component */
         public Builder(RecordComponent recordComponent) {
@@ -206,6 +211,12 @@ public final class ColumnMetadata {
         /** @param writeAs write-as mode @return this builder */
         public Builder writeAs(DataColumn.WriteAs writeAs) {
             this.writeAs = writeAs != null ? writeAs : DataColumn.WriteAs.AUTO;
+            return this;
+        }
+
+        /** @param stripTimezone whether to strip zone/offset for LocalDateTime @return this builder */
+        public Builder stripTimezone(boolean stripTimezone) {
+            this.stripTimezone = stripTimezone;
             return this;
         }
 

@@ -7,6 +7,7 @@ import com.opencsv.exceptions.CsvException;
 import dataset4j.CellValue;
 import dataset4j.Table;
 import dataset4j.ValueType;
+import dataset4j.util.ValuePool;
 
 import java.io.FileReader;
 import java.io.IOException;
@@ -37,6 +38,7 @@ public class CsvDatasetReader {
     private char quoteChar = '"';
     private char escapeChar = '\\';
     private int skipLines = 0;
+    private boolean internValues = false;
 
     private CsvDatasetReader(String filePath) {
         this.filePath = filePath;
@@ -91,6 +93,28 @@ public class CsvDatasetReader {
     }
 
     /**
+     * Deduplicate equal {@link CellValue} instances across all rows of a single read so that a
+     * single heap object is retained for each unique value.
+     *
+     * <p>CSV has no type metadata, so every cell is a {@code String}-typed {@link CellValue}.
+     * OpenCSV allocates a new {@code String} per cell even when the content repeats, and
+     * {@link CellValue#ofString(String)} / {@link CellValue#blank()} each allocate a new record.
+     * Enabling this flag collapses those duplicates, which is a big win for CSVs with repetitive
+     * columns (status, category, country, repeated numeric values, etc.).
+     *
+     * <p>Trade-off: adds a small {@code HashMap} lookup per cell. Default is {@code false}.
+     *
+     * <p>The pool is per-read and released as soon as the read returns.
+     *
+     * @param internValues {@code true} to enable per-read value deduplication
+     * @return this reader for chaining
+     */
+    public CsvDatasetReader internValues(boolean internValues) {
+        this.internValues = internValues;
+        return this;
+    }
+
+    /**
      * Read the CSV file into a {@link Table}.
      *
      * <p>All values are stored as {@link ValueType#STRING} with no format metadata.
@@ -133,17 +157,16 @@ public class CsvDatasetReader {
                 dataStart = 0;
             }
 
+            ValuePool pool = internValues ? new ValuePool() : null;
+
             List<Map<String, CellValue>> rows = new ArrayList<>();
             for (int i = dataStart; i < allLines.size(); i++) {
                 String[] line = allLines.get(i);
                 Map<String, CellValue> row = new LinkedHashMap<>();
                 for (int c = 0; c < columnNames.size(); c++) {
                     String value = c < line.length ? line[c] : "";
-                    if (value.isEmpty()) {
-                        row.put(columnNames.get(c), CellValue.blank());
-                    } else {
-                        row.put(columnNames.get(c), CellValue.ofString(value));
-                    }
+                    CellValue cv = value.isEmpty() ? CellValue.blank() : CellValue.ofString(value);
+                    row.put(columnNames.get(c), pool != null ? pool.intern(cv) : cv);
                 }
                 rows.add(row);
             }
